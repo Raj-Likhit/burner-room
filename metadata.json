@@ -1,0 +1,6 @@
+{
+  "name": "Burner Room",
+  "description": "Secure, temporary text snippets and file sharing across devices with 4-digit PINs, customizable TTL up to 1 hour, and instant burn-on-read self-destruction.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #0D0D0D;
+    color: #F5F5F5;
+    overflow-x: hidden;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Custom laser burn and pulse animations */
+@keyframes laser-sweep {
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes burn-disintegrate {
+  0% {
+    filter: brightness(1) drop-shadow(0 0 0px #FF3B30);
+    transform: scale(1);
+    opacity: 1;
+  }
+  30% {
+    filter: brightness(2) drop-shadow(0 0 20px #FF3B30);
+    transform: scale(1.02);
+  }
+  100% {
+    filter: brightness(0.2) blur(8px) drop-shadow(0 0 30px #FF3B30);
+    transform: scale(0.95);
+    opacity: 0;
+  }
+}
+
+.animate-laser {
+  animation: laser-sweep 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-burn {
+  animation: burn-disintegrate 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Custom scrollbars for clean minimalist look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0D0D0D;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 59, 48, 0.4);
+}
+
