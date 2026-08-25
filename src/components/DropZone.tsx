@@ -272,7 +272,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
               {/* Right controls: TTL Duration Selector & Share Policy */}
               <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
                 {/* TTL Duration Selector */}
-                <div className="flex items-center space-x-1 bg-white/[0.03] border border-white/10 p-1 rounded-lg">
+                <div id="ttl-selector-container" className="flex items-center space-x-1 bg-white/[0.03] border border-white/10 p-1 rounded-lg">
                   <div className="flex items-center px-1.5 text-white/30">
                     <Clock className="w-2.5 h-2.5" />
                   </div>
@@ -308,7 +308,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
                 </div>
 
                 {/* Share Policy: 1-Time Burn vs Multiple-Time Sharing */}
-                <div className="flex items-center space-x-1 bg-white/[0.03] border border-white/10 p-1 rounded-lg">
+                <div id="share-policy-container" className="flex items-center space-x-1 bg-white/[0.03] border border-white/10 p-1 rounded-lg">
                   <button
                     id="policy-burn-on-read"
                     onClick={() => setShareMode('burn_on_read')}

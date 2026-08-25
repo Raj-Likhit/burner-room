@@ -11,6 +11,7 @@ import { DropZone } from './components/DropZone';
 import { PickupView } from './components/PickupView';
 import { CountdownTimer } from './components/CountdownTimer';
 import { Footer } from './components/Footer';
+import { SpotlightOnboarding } from './components/SpotlightOnboarding';
 import { BurnerFileMetadata, PayloadType, ShareMode } from './types';
 import { Flame } from 'lucide-react';
 
@@ -27,15 +28,40 @@ export default function App() {
   const [shareMode, setShareMode] = useState<ShareMode>('burn_on_read');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [burnedNotice, setBurnedNotice] = useState<string | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
 
-  // Check URL query parameters for direct ?pin=4921 pairing
+  // Check URL query parameters for direct ?pin=4921 pairing and check first-time visitor status
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const queryPin = urlParams.get('pin');
     if (queryPin && queryPin.length === 4) {
       setMode('pickup');
     }
+
+    // Check if user has completed or skipped onboarding previously
+    try {
+      const hasSeenOnboarding = localStorage.getItem('burner_has_seen_onboarding');
+      if (!hasSeenOnboarding && !queryPin) {
+        // Show onboarding modal for first-time visitor
+        setShowOnboarding(true);
+      }
+    } catch {
+      // LocalStorage fallback
+    }
   }, []);
+
+  const handleCloseOnboarding = () => {
+    setShowOnboarding(false);
+    try {
+      localStorage.setItem('burner_has_seen_onboarding', 'true');
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleOpenOnboarding = () => {
+    setShowOnboarding(true);
+  };
 
   // Fetch or generate fresh session PIN from server
   const fetchNewSession = useCallback(async (customTtl?: number) => {
@@ -159,9 +185,13 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen w-full bg-[#0D0D0D] text-[#F5F5F5] flex flex-col font-sans select-none">
+    <div className="min-h-screen w-full bg-[#0D0D0D] text-[#F5F5F5] flex flex-col font-sans select-none antialiased">
       {/* Top Header Nav */}
-      <Navigation mode={mode} setMode={setMode} />
+      <Navigation
+        mode={mode}
+        setMode={setMode}
+        onOpenOnboarding={handleOpenOnboarding}
+      />
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col items-center justify-center px-4 sm:px-12 py-10 sm:py-16">
@@ -170,10 +200,10 @@ export default function App() {
             {mode === 'drop' ? (
               <motion.div
                 key="drop-mode"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -12 }}
-                transition={{ duration: 0.25 }}
+                initial={{ opacity: 0, y: 16, filter: 'blur(4px)' }}
+                animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                exit={{ opacity: 0, y: -16, filter: 'blur(4px)' }}
+                transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                 className="w-full flex flex-col items-center space-y-12 sm:space-y-16"
               >
                 {/* Centerpiece 4-Digit Session PIN */}
@@ -187,8 +217,10 @@ export default function App() {
                 {/* Burn Notice Banner if active */}
                 {burnedNotice && (
                   <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
+                    initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    transition={{ duration: 0.25 }}
                     className="p-3 px-6 rounded-xl bg-[#FF3B30]/10 border border-[#FF3B30]/30 text-[#FF3B30] text-xs flex items-center space-x-2 font-mono"
                   >
                     <Flame className="w-4 h-4 animate-pulse" />
@@ -225,10 +257,10 @@ export default function App() {
             ) : (
               <motion.div
                 key="pickup-mode"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -12 }}
-                transition={{ duration: 0.25 }}
+                initial={{ opacity: 0, y: 16, filter: 'blur(4px)' }}
+                animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                exit={{ opacity: 0, y: -16, filter: 'blur(4px)' }}
+                transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                 className="w-full flex flex-col items-center"
               >
                 <PickupView
@@ -246,6 +278,12 @@ export default function App() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Skippable Spotlight Guided Tour for First Time Visitors */}
+      <SpotlightOnboarding
+        isOpen={showOnboarding}
+        onClose={handleCloseOnboarding}
+      />
 
       {/* Persistent Minimalist Footer */}
       <Footer />

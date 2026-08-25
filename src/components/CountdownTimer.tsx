@@ -48,7 +48,7 @@ export const CountdownTimer: React.FC<CountdownTimerProps> = ({
   };
 
   return (
-    <div className="w-full max-w-sm space-y-3 select-none">
+    <div id="countdown-timer-container" className="w-full max-w-sm space-y-3 select-none">
       <div className="flex justify-between items-end">
         <span className="text-[10px] uppercase tracking-widest text-white/40 font-medium">
           {label}
