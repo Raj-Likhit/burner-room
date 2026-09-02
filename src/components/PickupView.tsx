@@ -1,25 +1,60 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { KeyRound, Download, Copy, Check, Flame, AlertCircle, ArrowLeft, ShieldAlert, Sparkles, CheckCircle2 } from 'lucide-react';
-import { BurnerPayload } from '../types';
+import {
+  KeyRound,
+  Download,
+  Copy,
+  Check,
+  Flame,
+  AlertCircle,
+  ArrowLeft,
+  ShieldAlert,
+  Sparkles,
+  CheckCircle2,
+  Lock,
+  FileCheck,
+  FileText,
+  Clock,
+  Unlock,
+  ShieldCheck,
+  AlertTriangle,
+  RotateCcw,
+  Zap,
+} from 'lucide-react';
+import { BurnerFileMetadata, BurnerPayload, CheckPayloadResponse, ApiErrorDetail } from '../types';
+import { importKeyFromString, decryptData, sanitizeFilename } from '../lib/crypto';
+import { BurnerApi, normalizeApiError } from '../lib/api';
+import { FileIconPreview } from './FileIconPreview';
+import { ClipboardFallbackModal } from './ClipboardFallbackModal';
 
 interface PickupViewProps {
   initialPin?: string;
+  initialKey?: string;
   onPickupSuccess: (payload: BurnerPayload) => void;
   onReturnToDrop: () => void;
 }
 
 export const PickupView: React.FC<PickupViewProps> = ({
   initialPin = '',
+  initialKey = '',
   onPickupSuccess,
   onReturnToDrop,
 }) => {
   const [digits, setDigits] = useState<string[]>(['', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [apiError, setApiError] = useState<ApiErrorDetail | null>(null);
+  const [lockoutSeconds, setLockoutSeconds] = useState<number | null>(null);
+  const [inspectedMeta, setInspectedMeta] = useState<CheckPayloadResponse | null>(null);
   const [retrievedPayload, setRetrievedPayload] = useState<BurnerPayload | null>(null);
-  const [isBurned, setIsBurned] = useState(false);
+  const [decryptedText, setDecryptedText] = useState<string | null>(null);
+  const [decryptedFile, setDecryptedFile] = useState<BurnerFileMetadata | null>(null);
+  const [e2eKeyString, setE2eKeyString] = useState<string>(initialKey);
+  const [manualKeyInput, setManualKeyInput] = useState<string>('');
+  const [needsManualKey, setNeedsManualKey] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [fallbackModalText, setFallbackModalText] = useState<string | null>(null);
 
   const inputRefs = [
     useRef<HTMLInputElement>(null),
@@ -28,24 +63,72 @@ export const PickupView: React.FC<PickupViewProps> = ({
     useRef<HTMLInputElement>(null),
   ];
 
-  // If initialPin provided from URL query param
+  // Parse URL hash for #key=... if present
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash) {
+      const match = hash.match(/key=([^&]+)/);
+      if (match && match[1]) {
+        setE2eKeyString(match[1]);
+      }
+    }
+  }, []);
+
+  // Lockout countdown timer
+  useEffect(() => {
+    if (lockoutSeconds === null || lockoutSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setLockoutSeconds((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(timer);
+          setApiError(null);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lockoutSeconds]);
+
+  // Initial PIN from URL query param: prefill digits and inspect metadata WITHOUT burning!
   useEffect(() => {
     if (initialPin && initialPin.length === 4) {
       const pinDigits = initialPin.split('');
       setDigits(pinDigits);
-      handleFetchPayload(initialPin);
+      handleInspectPayload(initialPin);
     }
   }, [initialPin]);
 
+  // Non-destructive check on PIN with BurnerApi client
+  const handleInspectPayload = async (pinCode: string) => {
+    setIsChecking(true);
+    setApiError(null);
+    setInspectedMeta(null);
+
+    try {
+      const data = await BurnerApi.checkPayload(pinCode);
+      if (data.exists) {
+        setInspectedMeta(data);
+      }
+    } catch (err: any) {
+      const normalized = normalizeApiError(err);
+      setApiError(normalized);
+      if (normalized.retryAfter) {
+        setLockoutSeconds(Number(normalized.retryAfter));
+      }
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
   const handleDigitChange = (index: number, value: string) => {
-    // Handle paste of 4 digits
     if (value.length > 1) {
       const cleaned = value.replace(/[^0-9]/g, '').slice(0, 4);
       if (cleaned.length === 4) {
         const next = cleaned.split('');
         setDigits(next);
         inputRefs[3].current?.focus();
-        handleFetchPayload(cleaned);
+        handleInspectPayload(cleaned);
         return;
       }
     }
@@ -59,64 +142,142 @@ export const PickupView: React.FC<PickupViewProps> = ({
       inputRefs[index + 1].current?.focus();
     }
 
-    // If all 4 filled, trigger pickup
+    // When all 4 digits entered, inspect metadata (safe preview, no burn)
     if (singleDigit && index === 3 && nextDigits.every((d) => d !== '')) {
-      handleFetchPayload(nextDigits.join(''));
+      handleInspectPayload(nextDigits.join(''));
     }
   };
 
   const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Backspace' && !digits[index] && index > 0) {
       inputRefs[index - 1].current?.focus();
+    } else if (e.key === 'Enter') {
+      const activePin = digits.join('');
+      if (activePin.length === 4) {
+        if (inspectedMeta) {
+          handleExplicitPickup(activePin);
+        } else {
+          handleInspectPayload(activePin);
+        }
+      }
     }
   };
 
-  const handleFetchPayload = async (pinCode: string) => {
+  // Explicit Human Tap: Executes /api/pickup & Decrypts
+  const handleExplicitPickup = async (pinCode: string, providedKey?: string) => {
     setIsLoading(true);
-    setErrorMessage(null);
+    setApiError(null);
+    setDownloadProgress(20);
+
+    const activeKeyStr = providedKey || e2eKeyString || manualKeyInput.trim();
 
     try {
-      const res = await fetch('/api/pickup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinCode }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        setErrorMessage(data.error || 'Failed to retrieve payload.');
-        setIsLoading(false);
-        return;
-      }
+      setDownloadProgress(45);
+      const data = await BurnerApi.pickupPayload(pinCode);
+      setDownloadProgress(70);
 
       if (data.success && data.payload) {
-        setRetrievedPayload(data.payload);
-        setIsBurned(true);
-        onPickupSuccess(data.payload);
-      } else {
-        setErrorMessage(data.error || 'No active payload found.');
+        const payload: BurnerPayload = data.payload;
+        setRetrievedPayload(payload);
+        setDownloadProgress(85);
+
+        // Handle End-to-End Decryption
+        if (payload.encryptedBundle?.isEncrypted) {
+          if (!activeKeyStr) {
+            setNeedsManualKey(true);
+            setIsLoading(false);
+            setDownloadProgress(null);
+            return;
+          }
+
+          try {
+            const cryptoKey = await importKeyFromString(activeKeyStr);
+            const decryptedRaw = await decryptData(payload.encryptedBundle, cryptoKey);
+
+            if (payload.type === 'text') {
+              setDecryptedText(decryptedRaw);
+            } else if (payload.type === 'file') {
+              const fileObj = JSON.parse(decryptedRaw);
+              setDecryptedFile({
+                name: sanitizeFilename(fileObj.name || payload.file?.name || 'decrypted-file'),
+                size: fileObj.size || payload.file?.size || 0,
+                type: fileObj.type || payload.file?.type || 'application/octet-stream',
+                dataUrl: fileObj.dataUrl,
+              });
+            }
+          } catch (decryptErr) {
+            console.error('Decryption failed', decryptErr);
+            setApiError({
+              code: 'DECRYPTION_FAILED',
+              message: 'Decryption failed. The encryption key in the link is invalid, mismatching, or corrupted.',
+              retryable: false,
+            });
+            setNeedsManualKey(true);
+          }
+        } else {
+          // Standard unencrypted payload
+          if (payload.type === 'text') {
+            setDecryptedText(payload.textContent || '');
+          } else if (payload.file) {
+            setDecryptedFile({
+              name: sanitizeFilename(payload.file.name),
+              size: payload.file.size,
+              type: payload.file.type,
+              dataUrl: payload.file.dataUrl,
+            });
+          }
+        }
+
+        setDownloadProgress(100);
+        onPickupSuccess(payload);
       }
-    } catch (err) {
-      setErrorMessage('Network connection error.');
+    } catch (err: any) {
+      const normalized = normalizeApiError(err);
+      setApiError(normalized);
+      if (normalized.retryAfter) {
+        setLockoutSeconds(Number(normalized.retryAfter));
+      }
     } finally {
       setIsLoading(false);
+      setTimeout(() => setDownloadProgress(null), 300);
+    }
+  };
+
+  const handleApplyManualKey = () => {
+    if (!manualKeyInput.trim()) return;
+    const key = manualKeyInput.trim();
+    setE2eKeyString(key);
+    setNeedsManualKey(false);
+    if (retrievedPayload && digits.every((d) => d !== '')) {
+      handleExplicitPickup(digits.join(''), key);
     }
   };
 
   const handleCopyText = async () => {
-    if (retrievedPayload?.textContent) {
-      await navigator.clipboard.writeText(retrievedPayload.textContent);
-      setCopiedText(true);
-      setTimeout(() => setCopiedText(false), 2000);
+    const textToCopy = decryptedText || retrievedPayload?.textContent;
+    if (textToCopy) {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(textToCopy);
+          setCopiedText(true);
+          setTimeout(() => setCopiedText(false), 2000);
+        } else {
+          setFallbackModalText(textToCopy);
+        }
+      } catch {
+        setFallbackModalText(textToCopy);
+      }
     }
   };
 
   const handleDownloadFile = () => {
-    if (!retrievedPayload?.file?.dataUrl) return;
+    const targetFile = decryptedFile || retrievedPayload?.file;
+    if (!targetFile?.dataUrl) return;
+
+    const safeName = sanitizeFilename(targetFile.name || 'burner-download');
     const a = document.createElement('a');
-    a.href = retrievedPayload.file.dataUrl;
-    a.download = retrievedPayload.file.name || 'burner-file';
+    a.href = targetFile.dataUrl;
+    a.download = safeName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -130,27 +291,29 @@ export const PickupView: React.FC<PickupViewProps> = ({
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
   };
 
+  const activePinString = digits.join('');
+
   return (
     <div className="w-full max-w-2xl flex flex-col items-center select-none">
       <AnimatePresence mode="wait">
         {!retrievedPayload ? (
-          /* PIN INPUT PROMPT */
+          /* PIN INPUT PROMPT & PREVIEW */
           <motion.div
             key="pin-entry"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="w-full flex flex-col items-center space-y-10"
+            className="w-full flex flex-col items-center space-y-8"
           >
-            <div className="text-center space-y-3">
-              <p className="text-[11px] uppercase tracking-[0.4em] text-white/40">
-                Retrieve Remote Payload
+            <div className="text-center space-y-2">
+              <p className="text-[11px] uppercase tracking-[0.4em] text-white/40 font-mono">
+                Retrieve Ephemeral Payload
               </p>
               <h2 className="text-2xl sm:text-3xl font-light text-white tracking-tight">
                 Enter 4-Digit Session PIN
               </h2>
-              <p className="text-xs text-white/50 max-w-sm mx-auto">
-                Enter the session PIN to retrieve the shared text or file payload.
+              <p className="text-xs text-white/50 max-w-sm mx-auto leading-relaxed">
+                Enter the session PIN or follow a shared link to unlock the payload.
               </p>
             </div>
 
@@ -173,35 +336,201 @@ export const PickupView: React.FC<PickupViewProps> = ({
               ))}
             </div>
 
-            {/* Error Message */}
-            {errorMessage && (
+            {/* Progress / Decryption Bar */}
+            {downloadProgress !== null && (
+              <div className="w-full max-w-md space-y-1.5 p-3 rounded-xl bg-white/[0.03] border border-white/10">
+                <div className="flex justify-between text-[10px] uppercase tracking-widest font-mono text-white/60">
+                  <span>Retrieving & Decrypting...</span>
+                  <span>{downloadProgress}%</span>
+                </div>
+                <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <motion.div
+                    className="h-full bg-[#FF3B30]"
+                    initial={{ width: '0%' }}
+                    animate={{ width: `${downloadProgress}%` }}
+                    transition={{ ease: 'easeOut', duration: 0.2 }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ERROR CARD / LOCKOUT CARD / DISTRIBUTED ATTACK NOTIFICATION */}
+            {apiError && (
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="p-4 rounded-xl bg-[#FF3B30]/10 border border-[#FF3B30]/30 text-[#FF3B30] text-xs flex items-center space-x-3 max-w-md"
+                className={`p-4 rounded-2xl border text-xs flex items-start space-x-3 max-w-md w-full ${
+                  apiError.code === 'DISTRIBUTED_ATTACK_BURNED'
+                    ? 'bg-[#FF3B30]/20 border-[#FF3B30] text-white shadow-[0_0_15px_rgba(255,59,48,0.3)]'
+                    : apiError.code === 'LOCKED_OUT'
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                    : 'bg-[#FF3B30]/10 border-[#FF3B30]/30 text-[#FF3B30]'
+                }`}
               >
-                <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                <span>{errorMessage}</span>
+                {apiError.code === 'DISTRIBUTED_ATTACK_BURNED' ? (
+                  <Flame className="w-5 h-5 flex-shrink-0 text-[#FF3B30] animate-pulse" />
+                ) : apiError.code === 'LOCKED_OUT' ? (
+                  <ShieldAlert className="w-5 h-5 flex-shrink-0 text-amber-400" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                )}
+                <div className="flex-1 text-left">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-semibold uppercase tracking-wider text-[10px] font-mono">
+                      {apiError.code === 'DISTRIBUTED_ATTACK_BURNED'
+                        ? 'SECURITY ALERT'
+                        : apiError.code === 'LOCKED_OUT'
+                        ? 'RATE LIMIT LOCKOUT'
+                        : 'PICKUP ERROR'}
+                    </span>
+                    {lockoutSeconds !== null && lockoutSeconds > 0 && (
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/40 text-amber-300">
+                        Unlocks in {Math.floor(lockoutSeconds / 60)}m {lockoutSeconds % 60}s
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 leading-relaxed text-white/90">{apiError.message}</p>
+                </div>
               </motion.div>
             )}
 
-            {/* Submit & Back Controls */}
-            <div className="flex flex-col items-center space-y-4">
-              <button
-                id="fetch-payload-btn"
-                onClick={() => handleFetchPayload(digits.join(''))}
-                disabled={isLoading || digits.some((d) => d === '')}
-                className="px-8 py-3 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-lg"
+            {/* SKELETON LOADING PREVIEW (Shows while non-destructively checking PIN) */}
+            {isChecking && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="w-full max-w-md p-6 rounded-2xl bg-white/[0.02] border border-white/10 flex flex-col space-y-4 text-center items-center animate-pulse"
               >
-                {isLoading ? 'Retrieving Payload...' : 'Fetch Payload'}
-              </button>
+                <div className="w-10 h-10 rounded-xl bg-white/10" />
+                <div className="space-y-2 w-full flex flex-col items-center">
+                  <div className="h-4 bg-white/10 rounded w-3/4" />
+                  <div className="h-3 bg-white/5 rounded w-1/2" />
+                </div>
+                <div className="h-10 bg-white/10 rounded-xl w-full" />
+              </motion.div>
+            )}
 
-              <button
-                onClick={onReturnToDrop}
-                className="flex items-center space-x-1.5 text-[10px] uppercase tracking-[0.2em] text-white/40 hover:text-white transition-colors"
+            {/* GATED PREVIEW CARD (Protects against Slack/iMessage Bot Unfurling auto-burn!) */}
+            {!isChecking && inspectedMeta && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full max-w-md p-6 rounded-2xl bg-white/[0.03] border border-white/20 flex flex-col space-y-4 shadow-xl text-center items-center"
               >
-                <ArrowLeft className="w-3 h-3" />
-                <span>Return to Drop</span>
+                <FileIconPreview
+                  fileName={inspectedMeta.fileMeta?.name}
+                  fileType={inspectedMeta.type === 'text' ? 'text/plain' : inspectedMeta.fileMeta?.type}
+                  size="lg"
+                />
+
+                <div className="space-y-1">
+                  <h4 className="text-base font-mono text-white font-medium">
+                    {inspectedMeta.type === 'file'
+                      ? inspectedMeta.fileMeta?.name || 'Incoming File'
+                      : 'Incoming Encrypted Text'}
+                  </h4>
+                  <p className="text-xs text-white/50">
+                    {inspectedMeta.type === 'file'
+                      ? `${formatFileSize(inspectedMeta.fileMeta?.size)} • ${inspectedMeta.fileMeta?.type || 'Binary'}`
+                      : 'Zero-persistence confidential snippet'}
+                  </p>
+                </div>
+
+                <div className="flex items-center space-x-2 text-[10px] font-mono text-white/60">
+                  <span className="px-2.5 py-1 rounded bg-white/5 border border-white/10 flex items-center space-x-1">
+                    <Clock className="w-3 h-3 text-[#FF3B30]" />
+                    <span>Expires in {Math.round((inspectedMeta.remainingSeconds || 600) / 60)}m</span>
+                  </span>
+
+                  {inspectedMeta.shareMode === 'multiple_reads' ? (
+                    <span className="px-2.5 py-1 rounded bg-white/10 border border-white/20 text-white">
+                      Multi-Share
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-1 rounded bg-[#FF3B30]/20 border border-[#FF3B30]/30 text-[#FF3B30]">
+                      1-Time Self-Destruct
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-white/40 italic">
+                  {inspectedMeta.shareMode === 'multiple_reads'
+                    ? 'Retrieving will log access. Payload remains until TTL expires.'
+                    : '🔥 Tapping below will retrieve and permanently incinerate this payload.'}
+                </p>
+
+                {/* EXPLICIT HUMAN TAP BUTTON */}
+                <button
+                  id="unlock-payload-btn"
+                  onClick={() => handleExplicitPickup(activePinString)}
+                  disabled={isLoading}
+                  className="w-full py-3.5 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all shadow-xl cursor-pointer flex items-center justify-center space-x-2"
+                >
+                  <Unlock className="w-4 h-4" />
+                  <span>{inspectedMeta.shareMode === 'multiple_reads' ? 'Unlock Payload' : 'Unlock & Incinerate'}</span>
+                </button>
+              </motion.div>
+            )}
+
+            {/* Fallback button if metadata not yet inspected */}
+            {!isChecking && !inspectedMeta && (
+              <div className="flex flex-col items-center space-y-4">
+                <button
+                  id="fetch-payload-btn"
+                  onClick={() => handleInspectPayload(activePinString)}
+                  disabled={isChecking || activePinString.length !== 4 || lockoutSeconds !== null}
+                  className="px-8 py-3 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-lg"
+                >
+                  {isChecking ? 'Checking PIN...' : 'Inspect Session'}
+                </button>
+
+                <button
+                  onClick={onReturnToDrop}
+                  className="flex items-center space-x-1.5 text-[10px] uppercase tracking-[0.2em] text-white/40 hover:text-white transition-colors cursor-pointer"
+                >
+                  <ArrowLeft className="w-3 h-3" />
+                  <span>Return to Drop</span>
+                </button>
+              </div>
+            )}
+          </motion.div>
+        ) : needsManualKey ? (
+          /* MANUAL KEY PROMPT IF E2E ENCRYPTED BUT KEY NOT IN URL */
+          <motion.div
+            key="key-prompt"
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-md p-8 rounded-3xl bg-white/[0.03] border border-white/20 flex flex-col space-y-6 text-center items-center shadow-2xl"
+          >
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
+              <ShieldCheck className="w-6 h-6 text-emerald-400" />
+            </div>
+
+            <div className="space-y-1">
+              <h3 className="text-xl font-light text-white tracking-wide">
+                Decryption Key Required
+              </h3>
+              <p className="text-xs text-white/50 max-w-xs mx-auto">
+                This payload was encrypted client-side with Zero-Knowledge AES-GCM. Enter the secret key provided by the sender.
+              </p>
+            </div>
+
+            <input
+              type="text"
+              id="manual-key-input"
+              value={manualKeyInput}
+              onChange={(e) => setManualKeyInput(e.target.value)}
+              placeholder="Paste Base64 URL key..."
+              className="w-full p-3 rounded-xl bg-black/50 border border-white/20 text-xs font-mono text-white placeholder-white/20 outline-none focus:border-emerald-400 text-center"
+            />
+
+            <div className="flex items-center space-x-3 w-full">
+              <button
+                onClick={handleApplyManualKey}
+                disabled={!manualKeyInput.trim()}
+                className="flex-1 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black text-xs uppercase tracking-[0.2em] font-semibold transition-all cursor-pointer disabled:opacity-40"
+              >
+                Decrypt Payload
               </button>
             </div>
           </motion.div>
@@ -214,21 +543,21 @@ export const PickupView: React.FC<PickupViewProps> = ({
             className="w-full flex flex-col items-center space-y-6"
           >
             {/* Burn or Multi-Share Alert Banner */}
-            {retrievedPayload.shareMode === 'multiple_reads' ? (
+            {retrievedPayload.shareMode === 'multiple_reads' && !retrievedPayload.status?.includes('retrieved') ? (
               <div className="w-full p-4 rounded-2xl bg-white/[0.03] border border-white/20 flex items-center justify-between">
                 <div className="flex items-center space-x-3">
                   <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white">
                     <CheckCircle2 className="w-4 h-4 text-[#FF3B30]" />
                   </div>
-                  <div>
+                  <div className="text-left">
                     <p className="text-xs uppercase tracking-widest text-white font-semibold flex items-center space-x-2">
                       <span>Multi-Device Drop Retrieved</span>
                       <span className="text-[10px] text-white/50 font-normal font-mono">
-                        (Access #{retrievedPayload.readCount || 1})
+                        (Access #{retrievedPayload.readCount || 1} / {retrievedPayload.maxReads || '∞'})
                       </span>
                     </p>
                     <p className="text-[10px] text-white/50">
-                      Payload remains available for other devices until the {Math.max(1, Math.round((retrievedPayload.ttlSeconds || 600) / 60))}-minute TTL expires.
+                      Payload remains available for other authorized devices until TTL expiration.
                     </p>
                   </div>
                 </div>
@@ -242,12 +571,12 @@ export const PickupView: React.FC<PickupViewProps> = ({
                   <div className="w-8 h-8 rounded-full bg-[#FF3B30]/20 flex items-center justify-center text-[#FF3B30]">
                     <Flame className="w-4 h-4" />
                   </div>
-                  <div>
+                  <div className="text-left">
                     <p className="text-xs uppercase tracking-widest text-[#FF3B30] font-semibold">
                       Read-Once Triggered — Payload Burned
                     </p>
                     <p className="text-[10px] text-white/50">
-                      Permanently purged from memory. This window holds the only remaining copy.
+                      Permanently incinerated from RAM. This browser holds the only remaining copy.
                     </p>
                   </div>
                 </div>
@@ -257,17 +586,17 @@ export const PickupView: React.FC<PickupViewProps> = ({
               </div>
             )}
 
-            {/* PAYLOAD CONTAINER */}
+            {/* PAYLOAD CONTENT CONTAINER */}
             {retrievedPayload.type === 'text' ? (
-              <div className="w-full relative border border-white/20 rounded-2xl bg-white/[0.02] p-6 sm:p-8 flex flex-col space-y-4">
+              <div className="w-full relative border border-white/20 rounded-3xl bg-white/[0.02] p-6 sm:p-8 flex flex-col space-y-4 shadow-xl">
                 <div className="flex justify-between items-center pb-3 border-b border-white/[0.05]">
                   <span className="text-[10px] uppercase tracking-widest text-white/40 font-mono">
-                    Decrypted String ({retrievedPayload.textContent?.length} characters)
+                    Decrypted String ({(decryptedText || retrievedPayload.textContent || '').length} characters)
                   </span>
                   <button
                     id="copy-retrieved-text"
                     onClick={handleCopyText}
-                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white text-white hover:text-black transition-all text-[10px] uppercase tracking-widest font-medium"
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white text-white hover:text-black transition-all text-[10px] uppercase tracking-widest font-medium cursor-pointer"
                   >
                     {copiedText ? (
                       <>
@@ -277,31 +606,34 @@ export const PickupView: React.FC<PickupViewProps> = ({
                     ) : (
                       <>
                         <Copy className="w-3 h-3" />
-                        <span>Copy All</span>
+                        <span>Copy Text</span>
                       </>
                     )}
                   </button>
                 </div>
 
-                <div className="p-4 rounded-xl bg-black/40 border border-white/5 overflow-x-auto max-h-80 select-text">
-                  <pre className="font-mono text-sm text-white/90 whitespace-pre-wrap break-all leading-relaxed">
-                    {retrievedPayload.textContent}
+                <div className="p-4 rounded-2xl bg-black/40 border border-white/5 overflow-x-auto max-h-80 select-text">
+                  <pre className="font-mono text-sm text-white/90 whitespace-pre-wrap break-all leading-relaxed text-left">
+                    {decryptedText || retrievedPayload.textContent}
                   </pre>
                 </div>
               </div>
             ) : (
               /* FILE CONTAINER */
-              <div className="w-full relative border border-white/20 rounded-2xl bg-white/[0.02] p-8 flex flex-col items-center text-center space-y-6">
-                <div className="w-16 h-16 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center">
-                  <Download className="w-8 h-8 text-[#FF3B30]" />
-                </div>
+              <div className="w-full relative border border-white/20 rounded-3xl bg-white/[0.02] p-8 flex flex-col items-center text-center space-y-6 shadow-xl">
+                <FileIconPreview
+                  fileName={decryptedFile?.name || retrievedPayload.file?.name}
+                  fileType={decryptedFile?.type || retrievedPayload.file?.type}
+                  dataUrl={decryptedFile?.dataUrl || retrievedPayload.file?.dataUrl}
+                  size="lg"
+                />
 
                 <div className="space-y-1">
-                  <h3 className="text-lg font-mono text-white">
-                    {retrievedPayload.file?.name}
+                  <h3 className="text-lg font-mono text-white max-w-sm truncate font-medium">
+                    {decryptedFile?.name || retrievedPayload.file?.name}
                   </h3>
-                  <p className="text-xs text-white/40 uppercase tracking-widest">
-                    {formatFileSize(retrievedPayload.file?.size)} • {retrievedPayload.file?.type}
+                  <p className="text-xs text-white/40 uppercase tracking-widest font-mono">
+                    {formatFileSize(decryptedFile?.size || retrievedPayload.file?.size)} • {decryptedFile?.type || retrievedPayload.file?.type}
                   </p>
                 </div>
 
@@ -316,12 +648,17 @@ export const PickupView: React.FC<PickupViewProps> = ({
               </div>
             )}
 
+            {/* Privacy note on residual URL hash keys */}
+            <div className="p-3 px-4 rounded-xl bg-white/[0.02] border border-white/10 text-[11px] text-white/40 text-center max-w-lg leading-relaxed">
+              <span className="text-white/60 font-medium">Privacy Note:</span> Hash fragment keys (<code className="text-[#FF3B30] font-mono">#key=...</code>) never reach server logs, but remain in local browser history & clipboard on this device. Close this browser tab or clear history for maximum confidentiality.
+            </div>
+
             {/* Finish and New Session */}
-            <div className="pt-4 flex items-center space-x-4">
+            <div className="pt-2 flex items-center space-x-4">
               <button
                 id="pickup-done-btn"
                 onClick={onReturnToDrop}
-                className="px-6 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white text-[11px] uppercase tracking-[0.2em] transition-all border border-white/10"
+                className="px-6 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white text-[11px] uppercase tracking-[0.2em] transition-all border border-white/10 cursor-pointer"
               >
                 Close & Return
               </button>
@@ -329,6 +666,14 @@ export const PickupView: React.FC<PickupViewProps> = ({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Clipboard Fallback Modal */}
+      <ClipboardFallbackModal
+        isOpen={fallbackModalText !== null}
+        onClose={() => setFallbackModalText(null)}
+        textToCopy={fallbackModalText || ''}
+        title="Copy Retrieved Text"
+      />
     </div>
   );
 };

@@ -1,26 +1,30 @@
 # 🔥 Burner Room
 
-> **Zero-Trace, Ephemeral File & Text Sharing Across Devices**
+> **Zero-Trace, Zero-Knowledge Ephemeral File & Text Sharing Across Devices**
 
-Burner Room is a minimalist, privacy-focused temporary transfer tool. Share sensitive text snippets, passwords, API tokens, or files across phones, laptops, and browsers using a disposable 4-digit PIN, customizable auto-purge timers, and strict burn-on-read self-destruction.
+Burner Room is a high-security, privacy-focused temporary transfer tool. Share sensitive text snippets, passwords, API tokens, or binary files across phones, laptops, and browsers using disposable 4-digit PINs, client-side AES-GCM-256 encryption, customizable auto-purge timers, and strict burn-on-read self-destruction.
 
 ---
 
-## ⚡ Quick Highlights
+## ⚡ Key Capabilities & Security Controls
 
-- **🔑 4-Digit Numeric PINs**: No user accounts, registration, or contact sharing required.
-- **⏱️ Customizable TTL**: Choose presets (`5m`, `10m`, `15m`, `30m`, `1h`) or set exact minute intervals (1–60 mins).
-- **🔒 Burn-on-Read or Multi-Share**: Incinerate payloads immediately upon first pickup or permit multi-device retrieval before TTL expiry.
-- **📁 50MB Files & 10k Text Characters**: Drag-and-drop any file format or paste code/tokens directly.
-- **🧠 Zero-Persistence RAM Buffers**: Payloads exist solely in temporary memory and are never written to disk or databases.
-- **🎯 Dynamic Spotlight Onboarding**: Interactive guided tour that highlights each key interface control with smooth spring motion.
-- **🚀 Vercel & Container Ready**: Dual-support for standalone Express/Node servers and Vercel serverless functions.
+- **🔐 Client-Side Zero-Knowledge Encryption**: Payloads are encrypted with 256-bit AES-GCM in browser RAM; encryption keys reside exclusively in the URL hash fragment (`#key=...`) and are never sent over HTTP to the server.
+- **🛡️ PIN Brute-Force Rate Limiting & Lockout**: Limits failed attempts to 5 per IP with a 10-minute automated lockout (`HTTP 429`) and live countdown timer.
+- **🔑 Cryptographic Sender Ownership Tokens**: Destructive actions (`/api/burn`) and real-time event streams require a cryptographically verified `senderToken` issued at session creation.
+- **🤖 Bot Link-Preview Auto-Burn Mitigation**: Deep-link URLs (`/?pin=XXXX`) pre-fill PIN inputs and show safe metadata previews, but strictly gate payload retrieval and destruction behind an explicit human click.
+- **⏱️ Customizable TTL (1m to 60m)**: Choose presets (`5m`, `10m`, `15m`, `30m`, `1h`) or set exact minute intervals before automated memory zeroization.
+- **🔒 Burn-on-Read or Multi-Share**: Incinerate payloads immediately upon first pickup or permit multi-device retrieval with optional maximum download caps.
+- **⚡ Live Server-Sent Events (SSE)**: Senders receive instant real-time browser alerts the moment their recipient retrieves or incinerates the payload.
+- **📁 50MB Files & Monospace Text Buffer**: Drag-and-drop any file format or paste confidential credentials directly.
+- **🧠 Zero-Persistence RAM Buffers**: Ephemeral in-memory storage with a 1.5GB total memory safety ceiling.
+- **🎯 Dynamic Spotlight Onboarding**: Interactive guided tour highlighting key controls with smooth spring physics.
 
 ---
 
 ## 🛠️ Tech Stack
 
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Motion (`motion/react`), Lucide React
+- **Cryptography**: Web Crypto API (SubtleCrypto AES-GCM 256-bit)
 - **Backend / API**: Express 4, TypeScript, Node.js (`server.ts` & `/api/index.ts`)
 - **Build Tools**: Vite, esbuild, TypeScript Compiler (`tsc`)
 - **Deployment**: Vercel Serverless Function configuration (`vercel.json`) & Cloud Run / Docker standalone server
@@ -67,19 +71,20 @@ Visit `http://localhost:3000` in your browser.
 
 ## 📖 How It Works
 
-1. **Sender Opens Drop View**: An ephemeral 4-digit PIN is generated instantly (e.g. `4921`).
+1. **Sender Opens Drop View**: An ephemeral 4-digit PIN is generated instantly (e.g. `4921`) along with a sender ownership token.
 2. **Configure & Upload**:
-   - Drag in a file (up to 50MB) or paste text (up to 10,000 chars).
+   - Drag in a file (up to 50MB) or paste confidential text.
+   - Choose **E2E Encryption** (Zero-Knowledge AES-GCM-256).
    - Select a TTL duration (e.g., 10 minutes).
-   - Choose **1-Time Read** (self-destruct on first open) or **Multi-Share**.
-3. **Recipient Enters PIN**: Recipient visits Burner Room on any device, switches to **Pickup**, and enters the 4-digit PIN (or opens direct URL `/?pin=4921`).
-4. **Instant Destruction**: Once retrieved in 1-time mode (or once the TTL countdown hits 0:00), the memory buffer is wiped permanently.
+   - Choose **1-Time Read** or **Multi-Share** (with optional max-reads cap).
+3. **Recipient Enters PIN**: Recipient opens Burner Room on any device, enters the PIN (or scans the QR code / clicks the 1-click link `/?pin=4921#key=...`).
+4. **Explicit Unlock & Incineration**: The recipient reviews the metadata and taps **"Unlock & Incinerate"**. The client decrypts the payload locally and the server wipes the memory buffer permanently.
 
 ---
 
-## 📚 Documentation
+## 📚 Complete Architecture Documentation
 
-For a comprehensive technical breakdown of all system capabilities, security guarantees, and API endpoints, see [FEATURES.md](./FEATURES.md).
+For a detailed breakdown of all security tiers, encryption specifications, and verification testing commands, see [FEATURES.md](./FEATURES.md).
 
 ---
 

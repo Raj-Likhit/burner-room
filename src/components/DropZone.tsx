@@ -1,11 +1,38 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'motion/react';
-import { FileText, UploadCloud, FileCheck, Flame, ArrowRight, X, AlertTriangle, Users, Lock, Clock, SlidersHorizontal } from 'lucide-react';
-import { BurnerFileMetadata, PayloadType, ShareMode } from '../types';
+import {
+  FileText,
+  UploadCloud,
+  FileCheck,
+  Flame,
+  ArrowRight,
+  X,
+  AlertTriangle,
+  Users,
+  Lock,
+  Clock,
+  SlidersHorizontal,
+  ShieldCheck,
+  Share2,
+  Check,
+  Copy,
+  Activity,
+  Sparkles,
+  Hash,
+  KeyRound,
+  RotateCcw,
+  Zap,
+  ShieldAlert,
+} from 'lucide-react';
+import { BurnerFileMetadata, EncryptedBundle, PayloadType, ShareMode, ApiErrorDetail } from '../types';
+import { generateE2EKey, exportKeyToString, encryptData, sanitizeFilename } from '../lib/crypto';
+import { BurnerApi, normalizeApiError, BurnerApiError } from '../lib/api';
+import { FileIconPreview } from './FileIconPreview';
 
 interface DropZoneProps {
   pin: string;
+  senderToken: string;
   isUploaded: boolean;
   uploadedType: PayloadType | null;
   uploadedFileName?: string;
@@ -13,18 +40,29 @@ interface DropZoneProps {
   uploadedTextPreview?: string;
   shareMode: ShareMode;
   setShareMode: (mode: ShareMode) => void;
+  maxReads?: number;
+  setMaxReads: (max?: number) => void;
   ttlSeconds: number;
   setTtlSeconds: (ttl: number) => void;
+  e2eKeyString?: string;
+  setE2eKeyString: (keyStr?: string) => void;
+  liveReadCount: number;
+  lastEventMessage: string | null;
   onDropPayload: (
     type: PayloadType,
     textContent?: string,
     fileMeta?: BurnerFileMetadata,
     modeSetting?: ShareMode,
-    ttlSetting?: number
+    ttlSetting?: number,
+    encryptedBundle?: EncryptedBundle,
+    e2eKeyStr?: string,
+    maxReadsSetting?: number,
+    customPin?: string
   ) => Promise<void>;
   onManualBurn: () => Promise<void>;
   onReset: () => void;
   isLoading: boolean;
+  onRequestCustomPin?: (pin: string) => Promise<void>;
 }
 
 const TTL_PRESETS = [
@@ -35,8 +73,16 @@ const TTL_PRESETS = [
   { label: '1h', value: 3600 },
 ];
 
+const MAX_READS_PRESETS = [
+  { label: 'Unlimited', value: undefined },
+  { label: '2 Reads', value: 2 },
+  { label: '5 Reads', value: 5 },
+  { label: '10 Reads', value: 10 },
+];
+
 export const DropZone: React.FC<DropZoneProps> = ({
   pin,
+  senderToken,
   isUploaded,
   uploadedType,
   uploadedFileName,
@@ -44,28 +90,107 @@ export const DropZone: React.FC<DropZoneProps> = ({
   uploadedTextPreview,
   shareMode,
   setShareMode,
+  maxReads,
+  setMaxReads,
   ttlSeconds,
   setTtlSeconds,
+  e2eKeyString,
+  setE2eKeyString,
+  liveReadCount,
+  lastEventMessage,
   onDropPayload,
   onManualBurn,
   onReset,
   isLoading,
+  onRequestCustomPin,
 }) => {
   const [activeInputMode, setActiveInputMode] = useState<'both' | 'text' | 'file'>('both');
   const [textContent, setTextContent] = useState('');
   const [selectedFile, setSelectedFile] = useState<{ file: File; dataUrl: string } | null>(null);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [apiError, setApiError] = useState<ApiErrorDetail | null>(null);
   const [showCustomSlider, setShowCustomSlider] = useState(false);
+  const [e2eEnabled, setE2eEnabled] = useState(true);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [sharedSuccess, setSharedSuccess] = useState(false);
 
-  // File drop handler with base64 data conversion
+  // Undo Window State (5s countdown before arming)
+  const [undoCountdown, setUndoCountdown] = useState<number | null>(null);
+  const [pendingDrop, setPendingDrop] = useState<{ type: 'text' | 'file' } | null>(null);
+  const undoTimerRef = useRef<any>(null);
+
+  // Custom Memorable PIN state
+  const [useCustomPin, setUseCustomPin] = useState(false);
+  const [customPinInput, setCustomPinInput] = useState('');
+  const [customPinAvailability, setCustomPinAvailability] = useState<{
+    checking: boolean;
+    available?: boolean;
+    message?: string;
+  }>({ checking: false });
+  const pinCheckTimeoutRef = useRef<any>(null);
+
+  // WebCrypto capability check
+  const isWebCryptoAvailable = typeof window !== 'undefined' && !!window.crypto?.subtle;
+
+  // Debounced check for custom PIN availability
+  useEffect(() => {
+    if (!useCustomPin || customPinInput.length !== 4) {
+      setCustomPinAvailability({ checking: false });
+      return;
+    }
+
+    if (pinCheckTimeoutRef.current) {
+      clearTimeout(pinCheckTimeoutRef.current);
+    }
+
+    setCustomPinAvailability({ checking: true });
+    pinCheckTimeoutRef.current = setTimeout(async () => {
+      try {
+        const res = await BurnerApi.checkPinAvailability(customPinInput);
+        setCustomPinAvailability({
+          checking: false,
+          available: res.available,
+          message: res.message,
+        });
+        if (res.available && onRequestCustomPin) {
+          onRequestCustomPin(customPinInput);
+        }
+      } catch (err: any) {
+        setCustomPinAvailability({
+          checking: false,
+          available: false,
+          message: 'Error verifying PIN availability.',
+        });
+      }
+    }, 400);
+
+    return () => {
+      if (pinCheckTimeoutRef.current) {
+        clearTimeout(pinCheckTimeoutRef.current);
+      }
+    };
+  }, [customPinInput, useCustomPin]);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    };
+  }, []);
+
+  // File drop handler
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    setErrorMessage(null);
+    setApiError(null);
     if (acceptedFiles.length === 0) return;
 
     const file = acceptedFiles[0];
     if (file.size > 50 * 1024 * 1024) {
-      setErrorMessage('File exceeds 50MB limit.');
+      setApiError({
+        code: 'PAYLOAD_TOO_LARGE',
+        message: 'File size exceeds maximum 50MB RAM buffer ceiling.',
+        retryable: false,
+      });
       return;
     }
 
@@ -78,12 +203,20 @@ export const DropZone: React.FC<DropZoneProps> = ({
         setIsProcessingFile(false);
       };
       reader.onerror = () => {
-        setErrorMessage('Failed to read file.');
+        setApiError({
+          code: 'FILE_READ_ERROR',
+          message: 'Failed to read file from browser storage.',
+          retryable: true,
+        });
         setIsProcessingFile(false);
       };
       reader.readAsDataURL(file);
     } catch (err) {
-      setErrorMessage('Error reading uploaded file.');
+      setApiError({
+        code: 'FILE_READ_ERROR',
+        message: 'Error reading uploaded file.',
+        retryable: true,
+      });
       setIsProcessingFile(false);
     }
   }, []);
@@ -95,25 +228,168 @@ export const DropZone: React.FC<DropZoneProps> = ({
     noClick: activeInputMode === 'text' || selectedFile !== null,
   } as any);
 
-  const handleUploadText = async () => {
-    if (!textContent.trim()) {
-      setErrorMessage('Please enter text content before dropping.');
-      return;
-    }
-    setErrorMessage(null);
-    await onDropPayload('text', textContent.trim(), undefined, shareMode, ttlSeconds);
+  // Simulated smooth progress animation
+  const simulateProgress = async () => {
+    setUploadProgress(15);
+    await new Promise((r) => setTimeout(r, 60));
+    setUploadProgress(45);
+    await new Promise((r) => setTimeout(r, 80));
+    setUploadProgress(85);
+    await new Promise((r) => setTimeout(r, 70));
+    setUploadProgress(100);
   };
 
-  const handleUploadFile = async () => {
-    if (!selectedFile) return;
-    setErrorMessage(null);
-    const fileMeta: BurnerFileMetadata = {
-      name: selectedFile.file.name,
-      size: selectedFile.file.size,
-      type: selectedFile.file.type || 'application/octet-stream',
-      dataUrl: selectedFile.dataUrl,
-    };
-    await onDropPayload('file', undefined, fileMeta, shareMode, ttlSeconds);
+  // Trigger 5-second reversible countdown before arming
+  const triggerArmCountdown = (type: 'text' | 'file') => {
+    if (type === 'text' && !textContent.trim()) {
+      setApiError({
+        code: 'EMPTY_TEXT',
+        message: 'Please enter text content before dropping.',
+        retryable: false,
+      });
+      return;
+    }
+    if (type === 'file' && !selectedFile) {
+      setApiError({
+        code: 'NO_FILE_SELECTED',
+        message: 'Please choose or drag a file to drop.',
+        retryable: false,
+      });
+      return;
+    }
+
+    setApiError(null);
+    setPendingDrop({ type });
+    setUndoCountdown(5);
+
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+
+    undoTimerRef.current = setInterval(() => {
+      setUndoCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(undoTimerRef.current);
+          executeFinalArm(type);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  // Cancel arming and return to editor
+  const handleCancelUndo = () => {
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    setUndoCountdown(null);
+    setPendingDrop(null);
+  };
+
+  // Immediate arm without waiting
+  const handleImmediateArm = () => {
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    if (pendingDrop) {
+      executeFinalArm(pendingDrop.type);
+    }
+    setUndoCountdown(null);
+    setPendingDrop(null);
+  };
+
+  // Execute payload upload & encryption
+  const executeFinalArm = async (type: 'text' | 'file') => {
+    setUploadProgress(10);
+    setApiError(null);
+
+    const activeCustomPin = useCustomPin && customPinAvailability.available ? customPinInput : undefined;
+
+    try {
+      if (type === 'text') {
+        await simulateProgress();
+        if (e2eEnabled && isWebCryptoAvailable) {
+          const key = await generateE2EKey();
+          const keyStr = await exportKeyToString(key);
+          const encryptedBundle = await encryptData(textContent.trim(), key);
+          setE2eKeyString(keyStr);
+          await onDropPayload(
+            'text',
+            undefined,
+            undefined,
+            shareMode,
+            ttlSeconds,
+            encryptedBundle,
+            keyStr,
+            maxReads,
+            activeCustomPin
+          );
+        } else {
+          setE2eKeyString(undefined);
+          await onDropPayload(
+            'text',
+            textContent.trim(),
+            undefined,
+            shareMode,
+            ttlSeconds,
+            undefined,
+            undefined,
+            maxReads,
+            activeCustomPin
+          );
+        }
+      } else if (type === 'file' && selectedFile) {
+        await simulateProgress();
+        const sanitizedName = sanitizeFilename(selectedFile.file.name);
+        const fileMeta: BurnerFileMetadata = {
+          name: sanitizedName,
+          size: selectedFile.file.size,
+          type: selectedFile.file.type || 'application/octet-stream',
+          dataUrl: selectedFile.dataUrl,
+        };
+
+        if (e2eEnabled && isWebCryptoAvailable) {
+          const key = await generateE2EKey();
+          const keyStr = await exportKeyToString(key);
+          const payloadString = JSON.stringify(fileMeta);
+          const encryptedBundle = await encryptData(payloadString, key);
+          setE2eKeyString(keyStr);
+
+          const securePlaceholderMeta: BurnerFileMetadata = {
+            name: sanitizedName,
+            size: selectedFile.file.size,
+            type: selectedFile.file.type || 'application/octet-stream',
+          };
+
+          await onDropPayload(
+            'file',
+            undefined,
+            securePlaceholderMeta,
+            shareMode,
+            ttlSeconds,
+            encryptedBundle,
+            keyStr,
+            maxReads,
+            activeCustomPin
+          );
+        } else {
+          setE2eKeyString(undefined);
+          await onDropPayload(
+            'file',
+            undefined,
+            fileMeta,
+            shareMode,
+            ttlSeconds,
+            undefined,
+            undefined,
+            maxReads,
+            activeCustomPin
+          );
+        }
+      }
+    } catch (err: any) {
+      const normalized = normalizeApiError(err);
+      setApiError(normalized);
+    } finally {
+      setUploadProgress(null);
+      setPendingDrop(null);
+      setUndoCountdown(null);
+    }
   };
 
   const formatFileSize = (bytes?: number) => {
@@ -133,50 +409,109 @@ export const DropZone: React.FC<DropZoneProps> = ({
     return `${Math.round(seconds / 60)} mins`;
   };
 
+  const getFullShareUrl = () => {
+    let url = `${window.location.origin}/?pin=${pin}`;
+    if (e2eKeyString) {
+      url += `#key=${e2eKeyString}`;
+    }
+    return url;
+  };
+
+  const handleCopyFullLink = async () => {
+    try {
+      await navigator.clipboard.writeText(getFullShareUrl());
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    } catch (err) {
+      console.error('Copy failed', err);
+    }
+  };
+
+  const handleNativeShare = async () => {
+    const url = getFullShareUrl();
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Burner Room Ephemeral Drop',
+          text: `Pickup your secure payload (PIN: ${pin}). It will self-destruct after pickup.`,
+          url: url,
+        });
+        setSharedSuccess(true);
+        setTimeout(() => setSharedSuccess(false), 2000);
+      } catch (err) {
+        handleCopyFullLink();
+      }
+    } else {
+      handleCopyFullLink();
+    }
+  };
+
   return (
     <div className="w-full max-w-3xl">
       <AnimatePresence mode="wait">
-        {/* STATE 1: ALREADY UPLOADED -> "READY FOR PICKUP" */}
+        {/* STATE 1: ALREADY UPLOADED -> "ARMED & READY FOR PICKUP" */}
         {isUploaded ? (
           <motion.div
             key="ready-state"
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.96 }}
-            className="w-full relative border border-white/20 rounded-2xl p-8 sm:p-12 bg-white/[0.02] flex flex-col items-center text-center space-y-6 shadow-2xl backdrop-blur-md overflow-hidden"
+            className="w-full relative border border-white/20 rounded-3xl p-8 sm:p-12 bg-white/[0.02] flex flex-col items-center text-center space-y-6 shadow-2xl backdrop-blur-md overflow-hidden"
           >
             {/* Top Laser Accent */}
             <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-[#FF3B30] to-transparent animate-laser" />
 
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 rounded-full bg-[#FF3B30] shadow-[0_0_8px_#FF3B30]" />
-              <span className="text-[10px] uppercase tracking-[0.3em] text-white/50 font-medium">
-                Live Payload Uplink Active
-              </span>
+            {/* Live Uplink Status & SSE Event Listener Status */}
+            <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-4">
+              <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-white/[0.04] border border-white/10">
+                <div className="w-2 h-2 rounded-full bg-[#FF3B30] shadow-[0_0_8px_#FF3B30] animate-pulse" />
+                <span className="text-[10px] uppercase tracking-[0.25em] text-white/70 font-mono">
+                  Live In-RAM Uplink Active
+                </span>
+              </div>
+
+              {e2eKeyString && (
+                <div className="flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] uppercase tracking-[0.2em] font-mono">
+                  <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                  <span>Zero-Knowledge AES-GCM</span>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
               <h3 className="text-xl sm:text-2xl font-light tracking-wide text-white">
                 Payload Armed & Ready for Pickup
               </h3>
-              <p className="text-sm font-light text-white/60 max-w-md mx-auto">
-                Share PIN <span className="font-mono text-[#FF3B30] font-semibold">{pin}</span> with your recipient
+              <p className="text-xs sm:text-sm font-light text-white/60 max-w-md mx-auto leading-relaxed">
+                Share PIN <span className="font-mono text-[#FF3B30] font-semibold">{pin}</span> or send the 1-click link with your recipient.
                 {shareMode === 'multiple_reads'
-                  ? `. Multi-device pickup active for ${formatDurationText(ttlSeconds)}.`
-                  : `. Incinerates permanently immediately upon first retrieval.`}
+                  ? ` Multi-device pickup active (${liveReadCount} / ${maxReads || '∞'} retrieved).`
+                  : ` Incinerates permanently immediately upon first human retrieval.`}
               </p>
             </div>
 
-            {/* Payload Brief info card */}
-            <div className="w-full max-w-md p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center justify-between text-left">
+            {/* Real-time SSE Live Event Toast Banner if triggered */}
+            {lastEventMessage && (
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="w-full max-w-md p-3 rounded-xl bg-[#FF3B30]/15 border border-[#FF3B30]/40 text-[#FF3B30] text-xs flex items-center space-x-2.5 font-mono shadow-lg"
+              >
+                <Activity className="w-4 h-4 animate-spin text-[#FF3B30]" />
+                <span>{lastEventMessage}</span>
+              </motion.div>
+            )}
+
+            {/* Payload Brief info card with rich thumbnail */}
+            <div className="w-full max-w-md p-4 rounded-2xl bg-white/[0.03] border border-white/10 flex items-center justify-between text-left shadow-sm">
               <div className="flex items-center space-x-3 overflow-hidden">
-                {uploadedType === 'file' ? (
-                  <FileCheck className="w-5 h-5 text-[#FF3B30] flex-shrink-0" />
-                ) : (
-                  <FileText className="w-5 h-5 text-[#FF3B30] flex-shrink-0" />
-                )}
+                <FileIconPreview
+                  fileName={uploadedFileName}
+                  fileType={uploadedType === 'text' ? 'text/plain' : 'application/octet-stream'}
+                  size="md"
+                />
                 <div className="truncate">
-                  <p className="text-xs font-mono text-white truncate">
+                  <p className="text-xs font-mono text-white truncate font-medium">
                     {uploadedType === 'file' ? uploadedFileName : 'Encrypted Text Snippet'}
                   </p>
                   <p className="text-[10px] uppercase tracking-wider text-white/40">
@@ -196,7 +531,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
                 {shareMode === 'multiple_reads' ? (
                   <span className="text-[9px] uppercase tracking-widest px-2.5 py-1 rounded bg-white/10 text-white font-mono border border-white/20 flex items-center space-x-1">
                     <Users className="w-3 h-3 text-[#FF3B30]" />
-                    <span>Multi</span>
+                    <span>{liveReadCount > 0 ? `${liveReadCount} reads` : 'Multi'}</span>
                   </span>
                 ) : (
                   <span className="text-[9px] uppercase tracking-widest px-2 py-0.5 rounded bg-[#FF3B30]/20 text-[#FF3B30] font-mono border border-[#FF3B30]/30">
@@ -206,22 +541,58 @@ export const DropZone: React.FC<DropZoneProps> = ({
               </div>
             </div>
 
+            {/* Quick Share Link Box */}
+            <div className="w-full max-w-md p-3 rounded-2xl bg-black/40 border border-white/10 flex items-center justify-between space-x-2">
+              <div className="truncate text-left pl-2">
+                <p className="text-[9px] uppercase tracking-widest text-white/40 font-mono">1-Click Direct Link</p>
+                <p className="text-[11px] font-mono text-white/80 truncate">{getFullShareUrl()}</p>
+              </div>
+
+              <div className="flex items-center space-x-1.5 flex-shrink-0">
+                <button
+                  id="share-native-btn"
+                  onClick={handleNativeShare}
+                  title="Share link via native device picker"
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white text-white hover:text-black transition-all text-[10px] uppercase tracking-wider font-semibold cursor-pointer"
+                >
+                  <Share2 className="w-3 h-3" />
+                  <span className="hidden sm:inline">Share</span>
+                </button>
+
+                <button
+                  id="copy-link-btn"
+                  onClick={handleCopyFullLink}
+                  title="Copy direct pickup link"
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/15 text-white/70 hover:text-white transition-all cursor-pointer"
+                >
+                  {copiedLink ? <Check className="w-3.5 h-3.5 text-[#FF3B30]" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+            </div>
+
+            {/* URL Fragment Key Residual Risk Copy */}
+            {e2eKeyString && (
+              <div className="w-full max-w-md p-3 px-4 rounded-xl bg-white/[0.02] border border-white/10 text-[11px] text-white/40 text-center leading-relaxed">
+                <span className="text-white/60 font-medium">Privacy Note:</span> Hash fragment keys (<code className="text-[#FF3B30] font-mono">#key=...</code>) are processed entirely in the browser and never sent to server logs, but remain in local browser history & clipboard.
+              </div>
+            )}
+
             {/* Action Buttons */}
             <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
               <button
                 id="manual-burn-btn"
                 onClick={onManualBurn}
                 disabled={isLoading}
-                className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-[#FF3B30]/10 hover:bg-[#FF3B30]/20 text-[#FF3B30] text-[11px] uppercase tracking-[0.2em] font-medium border border-[#FF3B30]/30 transition-all cursor-pointer"
+                className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-[#FF3B30]/10 hover:bg-[#FF3B30]/20 text-[#FF3B30] text-[11px] uppercase tracking-[0.2em] font-medium border border-[#FF3B30]/30 transition-all cursor-pointer active:scale-95"
               >
                 <Flame className="w-3.5 h-3.5" />
-                <span>Burn Now</span>
+                <span>Burn Now (Owner)</span>
               </button>
 
               <button
                 id="drop-another-btn"
                 onClick={onReset}
-                className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white text-[11px] uppercase tracking-[0.2em] font-medium border border-white/10 transition-all cursor-pointer"
+                className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white text-[11px] uppercase tracking-[0.2em] font-medium border border-white/10 transition-all cursor-pointer"
               >
                 <span>New Session</span>
               </button>
@@ -236,7 +607,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
             exit={{ opacity: 0, y: -8 }}
             className="w-full flex flex-col space-y-4"
           >
-            {/* Top configuration bar: Mode tabs, TTL selector & Share policy picker */}
+            {/* Top configuration bar: Mode tabs, TTL selector, Share policy, and E2E toggle */}
             <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 px-1">
               <div className="flex items-center space-x-2">
                 <button
@@ -245,9 +616,9 @@ export const DropZone: React.FC<DropZoneProps> = ({
                     setActiveInputMode('both');
                     setSelectedFile(null);
                   }}
-                  className={`text-[10px] uppercase tracking-[0.2em] px-3 py-1 rounded-md transition-all cursor-pointer ${
+                  className={`text-[10px] uppercase tracking-[0.2em] px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
                     activeInputMode === 'both' && !selectedFile
-                      ? 'bg-white/10 text-white font-medium'
+                      ? 'bg-white/10 text-white font-medium shadow-sm'
                       : 'text-white/40 hover:text-white'
                   }`}
                 >
@@ -259,9 +630,9 @@ export const DropZone: React.FC<DropZoneProps> = ({
                     setActiveInputMode('text');
                     setSelectedFile(null);
                   }}
-                  className={`text-[10px] uppercase tracking-[0.2em] px-3 py-1 rounded-md transition-all cursor-pointer ${
+                  className={`text-[10px] uppercase tracking-[0.2em] px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
                     activeInputMode === 'text'
-                      ? 'bg-white/10 text-white font-medium'
+                      ? 'bg-white/10 text-white font-medium shadow-sm'
                       : 'text-white/40 hover:text-white'
                   }`}
                 >
@@ -269,11 +640,41 @@ export const DropZone: React.FC<DropZoneProps> = ({
                 </button>
               </div>
 
-              {/* Right controls: TTL Duration Selector & Share Policy */}
+              {/* Right controls: TTL Duration Selector, Share Policy, E2E toggle */}
               <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+                {/* Custom Memorable PIN Toggle */}
+                <button
+                  id="toggle-custom-pin-btn"
+                  onClick={() => setUseCustomPin(!useCustomPin)}
+                  title="Choose your own memorable 4-digit PIN"
+                  className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[9px] uppercase tracking-[0.18em] font-mono border transition-all cursor-pointer ${
+                    useCustomPin
+                      ? 'bg-white/15 border-white/30 text-white font-semibold'
+                      : 'bg-white/[0.03] border-white/10 text-white/30 hover:text-white/60'
+                  }`}
+                >
+                  <KeyRound className="w-3 h-3" />
+                  <span>Custom PIN</span>
+                </button>
+
+                {/* Zero-Knowledge E2E Toggle */}
+                <button
+                  id="toggle-e2e-btn"
+                  onClick={() => setE2eEnabled(!e2eEnabled)}
+                  title="Client-Side AES-GCM End-to-End Encryption (Keys never touch server)"
+                  className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[9px] uppercase tracking-[0.18em] font-mono border transition-all cursor-pointer ${
+                    e2eEnabled
+                      ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 font-semibold'
+                      : 'bg-white/[0.03] border-white/10 text-white/30 hover:text-white/60'
+                  }`}
+                >
+                  <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                  <span>E2E {e2eEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+
                 {/* TTL Duration Selector */}
                 <div id="ttl-selector-container" className="flex items-center space-x-1 bg-white/[0.03] border border-white/10 p-1 rounded-lg">
-                  <div className="flex items-center px-1.5 text-white/30">
+                  <div className="flex items-center px-1 text-white/30">
                     <Clock className="w-2.5 h-2.5" />
                   </div>
                   {TTL_PRESETS.map((preset) => (
@@ -320,12 +721,12 @@ export const DropZone: React.FC<DropZoneProps> = ({
                     }`}
                   >
                     <Lock className="w-2.5 h-2.5" />
-                    <span>1-Time Read</span>
+                    <span>1-Time</span>
                   </button>
                   <button
                     id="policy-multiple-reads"
                     onClick={() => setShareMode('multiple_reads')}
-                    title="Allows multiple downloads/reads across devices until TTL expires"
+                    title="Allows multiple downloads/reads across devices until TTL expires or max count reached"
                     className={`flex items-center space-x-1.5 px-2.5 py-1 rounded text-[9px] uppercase tracking-[0.2em] font-medium transition-all cursor-pointer ${
                       shareMode === 'multiple_reads'
                         ? 'bg-white/15 text-white border border-white/20 font-semibold'
@@ -333,11 +734,79 @@ export const DropZone: React.FC<DropZoneProps> = ({
                     }`}
                   >
                     <Users className="w-2.5 h-2.5 text-[#FF3B30]" />
-                    <span>Multi-Share</span>
+                    <span>Multi</span>
                   </button>
                 </div>
               </div>
             </div>
+
+            {/* Custom Memorable PIN Drawer */}
+            <AnimatePresence>
+              {useCustomPin && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="p-3 bg-white/[0.03] border border-white/15 rounded-2xl flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center space-x-2">
+                      <KeyRound className="w-4 h-4 text-[#FF3B30]" />
+                      <span className="text-xs font-mono text-white/80">Choose Memorable 4-Digit PIN:</span>
+                    </div>
+
+                    <div className="flex items-center space-x-3">
+                      <input
+                        type="text"
+                        id="custom-pin-field"
+                        maxLength={4}
+                        placeholder="e.g. 7788"
+                        value={customPinInput}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 4);
+                          setCustomPinInput(val);
+                        }}
+                        className="w-24 px-3 py-1.5 rounded-xl bg-black/60 border border-white/20 text-center font-mono text-base font-semibold text-white tracking-widest focus:border-[#FF3B30] outline-none"
+                      />
+
+                      {customPinInput.length === 4 && (
+                        <div className="text-[11px] font-mono flex items-center space-x-1">
+                          {customPinAvailability.checking ? (
+                            <span className="text-white/40">Checking availability...</span>
+                          ) : customPinAvailability.available ? (
+                            <span className="text-emerald-400 flex items-center space-x-1">
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Available</span>
+                            </span>
+                          ) : (
+                            <span className="text-amber-400 flex items-center space-x-1">
+                              <AlertTriangle className="w-3.5 h-3.5" />
+                              <span>{customPinAvailability.message || 'Unavailable'}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Warning if user explicitly opts out of E2E */}
+            {!e2eEnabled && (
+              <div className="w-full p-2.5 px-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] flex items-center justify-between font-mono">
+                <div className="flex items-center space-x-2">
+                  <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" />
+                  <span>Unencrypted Mode: Content will be kept in ephemeral server RAM without client encryption.</span>
+                </div>
+                <button
+                  onClick={() => setE2eEnabled(true)}
+                  className="px-2 py-0.5 rounded bg-amber-400 text-black text-[9px] uppercase tracking-wider font-semibold cursor-pointer"
+                >
+                  Enable E2E
+                </button>
+              </div>
+            )}
 
             {/* Custom TTL Slider Drawer */}
             <AnimatePresence>
@@ -348,156 +817,269 @@ export const DropZone: React.FC<DropZoneProps> = ({
                   exit={{ opacity: 0, height: 0 }}
                   className="overflow-hidden"
                 >
-                  <div className="p-3 px-4 rounded-xl bg-white/[0.02] border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                    <div className="flex items-center space-x-2">
-                      <Clock className="w-3.5 h-3.5 text-[#FF3B30]" />
-                      <span className="text-[10px] uppercase tracking-widest text-white/50">
-                        Custom Auto-Destruct TTL:
-                      </span>
-                      <span className="font-mono text-white font-semibold">
-                        {formatDurationText(ttlSeconds)} ({Math.round(ttlSeconds / 60)} min)
-                      </span>
+                  <div className="p-3 bg-white/[0.03] border border-white/10 rounded-xl flex items-center space-x-4">
+                    <span className="text-[10px] uppercase tracking-widest text-white/50 font-mono flex-shrink-0">
+                      Custom TTL:
+                    </span>
+                    <input
+                      type="range"
+                      min={60}
+                      max={3600}
+                      step={60}
+                      value={ttlSeconds}
+                      onChange={(e) => setTtlSeconds(Number(e.target.value))}
+                      className="w-full accent-[#FF3B30] cursor-pointer"
+                    />
+                    <span className="text-xs font-mono text-[#FF3B30] font-semibold w-16 text-right">
+                      {formatDurationText(ttlSeconds)}
+                    </span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Multi-Share Max-Reads Preset Selector */}
+            <AnimatePresence>
+              {shareMode === 'multiple_reads' && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="p-3 bg-white/[0.02] border border-white/10 rounded-xl flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center space-x-2 text-[10px] uppercase tracking-widest text-white/50 font-mono">
+                      <Hash className="w-3 h-3 text-[#FF3B30]" />
+                      <span>Max Download Cap:</span>
                     </div>
-                    <div className="flex items-center space-x-3 flex-1 sm:max-w-xs">
-                      <span className="text-[9px] font-mono text-white/30">1m</span>
-                      <input
-                        id="ttl-custom-slider"
-                        type="range"
-                        min="1"
-                        max="60"
-                        step="1"
-                        value={Math.round(ttlSeconds / 60)}
-                        onChange={(e) => setTtlSeconds(Number(e.target.value) * 60)}
-                        className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[#FF3B30]"
-                      />
-                      <span className="text-[9px] font-mono text-white/30">60m</span>
+                    <div className="flex items-center space-x-1.5">
+                      {MAX_READS_PRESETS.map((p) => (
+                        <button
+                          key={p.label}
+                          onClick={() => setMaxReads(p.value)}
+                          className={`px-2.5 py-1 rounded text-[9px] uppercase tracking-wider font-mono transition-all cursor-pointer ${
+                            maxReads === p.value
+                              ? 'bg-[#FF3B30]/20 text-[#FF3B30] border border-[#FF3B30]/30 font-semibold'
+                              : 'bg-white/5 text-white/40 hover:text-white border border-transparent'
+                          }`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* Error banner */}
-            {errorMessage && (
-              <div className="p-3 rounded-xl bg-[#FF3B30]/10 border border-[#FF3B30]/30 text-[#FF3B30] text-xs flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <AlertTriangle className="w-4 h-4" />
-                  <span>{errorMessage}</span>
+            {/* 5-SECOND REVERSIBLE UNDO BANNER */}
+            <AnimatePresence>
+              {undoCountdown !== null && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.98, y: -4 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.98, y: -4 }}
+                  className="w-full p-4 rounded-2xl bg-[#FF3B30]/15 border border-[#FF3B30]/40 text-white flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl backdrop-blur-md"
+                >
+                  <div className="flex items-center space-x-3">
+                    <div className="w-9 h-9 rounded-full bg-[#FF3B30] text-white flex items-center justify-center font-mono font-bold text-sm shadow-md animate-pulse">
+                      {undoCountdown}s
+                    </div>
+                    <div className="text-left">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-white">
+                        Arming Payload into RAM in {undoCountdown} seconds...
+                      </p>
+                      <p className="text-[11px] text-white/60">
+                        Drop will publish automatically. Click Undo to modify or cancel.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      id="undo-arm-btn"
+                      onClick={handleCancelUndo}
+                      className="px-4 py-2 rounded-xl bg-white text-black text-xs uppercase tracking-wider font-semibold hover:bg-white/90 transition-all cursor-pointer flex items-center space-x-1.5 shadow-md"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Undo & Edit</span>
+                    </button>
+                    <button
+                      id="arm-immediately-btn"
+                      onClick={handleImmediateArm}
+                      className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs uppercase tracking-wider font-semibold transition-all cursor-pointer flex items-center space-x-1"
+                    >
+                      <Zap className="w-3.5 h-3.5 text-[#FF3B30]" />
+                      <span>Arm Now</span>
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* STANDARDIZED RICH ERROR NOTIFICATION */}
+            {apiError && (
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={`p-4 rounded-2xl border text-xs flex items-start justify-between gap-3 ${
+                  apiError.code === 'BUFFER_FULL' || apiError.code === 'QUOTA_EXCEEDED'
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                    : 'bg-[#FF3B30]/10 border-[#FF3B30]/30 text-[#FF3B30]'
+                }`}
+              >
+                <div className="flex items-start space-x-3">
+                  <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <div className="text-left">
+                    <div className="flex items-center space-x-2">
+                      <span className="font-semibold uppercase tracking-wider text-[10px] font-mono">
+                        {apiError.code}
+                      </span>
+                      {apiError.retryAfter && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/40 text-amber-300">
+                          Retry in {apiError.retryAfter}s
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 leading-relaxed text-white/90">{apiError.message}</p>
+                  </div>
                 </div>
-                <button onClick={() => setErrorMessage(null)}>
-                  <X className="w-3.5 h-3.5" />
-                </button>
+
+                <div className="flex items-center space-x-1 flex-shrink-0">
+                  {apiError.retryable && (
+                    <button
+                      onClick={() => {
+                        setApiError(null);
+                        if (pendingDrop) triggerArmCountdown(pendingDrop.type);
+                        else if (selectedFile) triggerArmCountdown('file');
+                        else if (textContent) triggerArmCountdown('text');
+                      }}
+                      className="px-2.5 py-1 rounded bg-white/20 hover:bg-white/30 text-white text-[10px] uppercase tracking-wider font-semibold cursor-pointer"
+                    >
+                      Retry
+                    </button>
+                  )}
+                  <button onClick={() => setApiError(null)} className="p-1 hover:text-white">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* PROGRESS BAR ANIMATION */}
+            {uploadProgress !== null && (
+              <div className="w-full space-y-1.5 p-3 rounded-xl bg-white/[0.03] border border-white/10">
+                <div className="flex justify-between text-[10px] uppercase tracking-widest font-mono text-white/60">
+                  <span>{e2eEnabled ? 'Encrypting & Arming...' : 'Arming Payload...'}</span>
+                  <span>{uploadProgress}%</span>
+                </div>
+                <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <motion.div
+                    className="h-full bg-[#FF3B30]"
+                    initial={{ width: '0%' }}
+                    animate={{ width: `${uploadProgress}%` }}
+                    transition={{ ease: 'easeOut', duration: 0.2 }}
+                  />
+                </div>
               </div>
             )}
 
-            {/* TEXT MODE EDITOR */}
-            {activeInputMode === 'text' && !selectedFile ? (
-              <div className="w-full relative border border-white/20 rounded-2xl bg-white/[0.02] p-6 flex flex-col space-y-4 hover:border-white/30 transition-all">
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] uppercase tracking-widest text-white/40">
-                    Secure Text Buffer
-                  </span>
-                  <span className="text-[10px] font-mono text-white/30">
-                    {textContent.length} / 10,000 chars
-                  </span>
+            {/* FILE OR TEXT INPUT CONTAINER */}
+            {activeInputMode === 'text' ? (
+              /* TEXT EDITOR */
+              <div className="relative w-full border border-white/20 rounded-3xl bg-white/[0.02] p-5 sm:p-6 flex flex-col space-y-4 focus-within:border-[#FF3B30] transition-colors">
+                <div className="flex justify-between items-center text-[10px] uppercase tracking-widest text-white/40 font-mono">
+                  <span>Paste Secret Notes or Credentials</span>
+                  <span>{textContent.length} chars</span>
                 </div>
 
                 <textarea
-                  id="burner-text-input"
-                  rows={7}
-                  maxLength={10000}
+                  id="text-payload-input"
                   value={textContent}
                   onChange={(e) => setTextContent(e.target.value)}
-                  placeholder="Paste passwords, API tokens, terminal commands, or secret notes here..."
-                  className="w-full bg-transparent text-sm sm:text-base font-mono text-white/90 placeholder-white/20 border-none outline-none resize-none leading-relaxed focus:ring-0"
+                  placeholder="Paste confidential credentials, keys, or message here..."
+                  rows={6}
+                  className="w-full bg-transparent text-sm font-mono text-white placeholder-white/20 outline-none resize-none leading-relaxed"
                 />
 
-                <div className="flex justify-between items-center pt-2 border-t border-white/[0.05]">
-                  <span className="text-[9px] uppercase tracking-[0.2em] text-white/30">
-                    {shareMode === 'multiple_reads' ? `Multi-device access (${formatDurationText(ttlSeconds)})` : `Self-destruct on 1st read (${formatDurationText(ttlSeconds)} max)`}
-                  </span>
+                <div className="flex justify-end pt-2">
                   <button
-                    id="upload-text-btn"
-                    onClick={handleUploadText}
-                    disabled={isLoading || !textContent.trim()}
-                    className="flex items-center space-x-2 px-6 py-2 rounded-xl bg-white text-black text-[11px] uppercase tracking-[0.2em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                    id="drop-text-payload-btn"
+                    onClick={() => triggerArmCountdown('text')}
+                    disabled={isLoading || !textContent.trim() || undoCountdown !== null}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-lg"
                   >
-                    <span>{isLoading ? 'Encrypting...' : 'Arm & Lock Drop'}</span>
+                    <span>Arm Payload</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
             ) : selectedFile ? (
-              /* SELECTED FILE READY STATE */
-              <div className="w-full relative border border-white/30 rounded-2xl bg-white/[0.03] p-8 flex flex-col items-center text-center space-y-5">
-                <div className="w-12 h-12 rounded-2xl bg-white/[0.05] border border-white/10 flex items-center justify-center">
-                  <FileText className="w-6 h-6 text-[#FF3B30]" />
-                </div>
+              /* SELECTED FILE PREVIEW WITH THUMBNAILS */
+              <div className="relative w-full border border-white/20 rounded-3xl bg-white/[0.02] p-8 flex flex-col items-center text-center space-y-5">
+                <FileIconPreview
+                  fileName={selectedFile.file.name}
+                  fileType={selectedFile.file.type}
+                  dataUrl={selectedFile.dataUrl}
+                  size="lg"
+                />
+
                 <div className="space-y-1">
-                  <p className="text-sm font-mono text-white font-medium">{selectedFile.file.name}</p>
-                  <p className="text-xs text-white/40">{formatFileSize(selectedFile.file.size)} • {formatDurationText(ttlSeconds)} TTL</p>
+                  <h4 className="text-base font-mono text-white max-w-sm truncate font-medium">
+                    {selectedFile.file.name}
+                  </h4>
+                  <p className="text-xs font-mono text-white/40">
+                    {formatFileSize(selectedFile.file.size)} • {selectedFile.file.type || 'Binary'}
+                  </p>
                 </div>
 
                 <div className="flex items-center space-x-3">
                   <button
                     id="cancel-file-btn"
                     onClick={() => setSelectedFile(null)}
-                    className="px-4 py-2 rounded-xl text-white/50 hover:text-white text-xs uppercase tracking-wider cursor-pointer"
+                    disabled={undoCountdown !== null}
+                    className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/60 hover:text-white text-[11px] uppercase tracking-wider transition-all cursor-pointer"
                   >
-                    Cancel
+                    Remove
                   </button>
+
                   <button
-                    id="upload-file-btn"
-                    onClick={handleUploadFile}
-                    disabled={isLoading}
-                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-[11px] uppercase tracking-[0.2em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all cursor-pointer"
+                    id="drop-selected-file-btn"
+                    onClick={() => triggerArmCountdown('file')}
+                    disabled={isLoading || undoCountdown !== null}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all cursor-pointer shadow-lg"
                   >
-                    <span>{isLoading ? 'Encrypting...' : 'Upload & Arm PIN'}</span>
+                    <span>Arm File</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
             ) : (
-              /* UNIVERSAL DROPZONE (Clean Minimalism Design Template) */
+              /* DRAG & DROP UNIVERSAL ZONE */
               <div
                 {...getRootProps()}
-                id="burner-dropzone"
-                className={`relative w-full aspect-[21/9] sm:min-h-[220px] border border-dashed rounded-2xl flex flex-col items-center justify-center transition-all cursor-pointer group ${
+                id="file-dropzone-container"
+                className={`relative w-full border-2 border-dashed rounded-3xl p-10 sm:p-14 flex flex-col items-center text-center justify-center transition-all cursor-pointer group ${
                   isDragActive
-                    ? 'border-[#FF3B30] bg-[#FF3B30]/[0.05] scale-[1.01]'
-                    : 'border-white/20 bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/40'
+                    ? 'border-[#FF3B30] bg-[#FF3B30]/5 scale-[0.99]'
+                    : 'border-white/15 hover:border-white/40 bg-white/[0.01] hover:bg-white/[0.02]'
                 }`}
               >
-                <input {...getInputProps()} id="file-drop-input" />
+                <input {...getInputProps()} id="file-upload-input" />
 
-                {/* Top Protocol Tag */}
-                <div className="absolute top-4 sm:top-6 left-6 sm:left-8 flex items-center space-x-2">
-                  <div className="w-1.5 h-1.5 bg-white/20 rounded-full"></div>
-                  <span className="text-[9px] uppercase tracking-widest text-white/30">
-                    TTL: {formatDurationText(ttlSeconds)}
-                  </span>
+                <div className="w-14 h-14 rounded-2xl bg-white/[0.03] border border-white/10 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                  <UploadCloud className="w-7 h-7 text-white/60 group-hover:text-[#FF3B30] transition-colors" />
                 </div>
 
-                {/* Center Content */}
-                <div className="flex flex-col items-center space-y-3 sm:space-y-4 px-4 text-center">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.03] border border-white/10 flex items-center justify-center text-white/40 group-hover:text-white group-hover:border-white/30 transition-all">
-                    <UploadCloud className="w-5 h-5" />
-                  </div>
+                <h3 className="text-base sm:text-lg font-light text-white tracking-wide">
+                  {isDragActive ? 'Release to upload' : 'Drag & drop any file or click to browse'}
+                </h3>
+                <p className="text-xs text-white/40 mt-1 font-mono">
+                  Up to 50MB per drop • Kept strictly in RAM • Zero disk persistence
+                </p>
 
-                  <p className="text-base sm:text-lg font-light tracking-wide text-white/70 group-hover:text-white transition-colors">
-                    {isDragActive
-                      ? 'Release to upload payload'
-                      : 'Drop payload or paste secure string'}
-                  </p>
-
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-white/30 font-mono">
-                    Max 50MB / 10k Characters • Up to 1 Hour TTL
-                  </span>
-                </div>
-
-                {/* Bottom Uplink Tag */}
-                <div className="absolute bottom-4 sm:bottom-6 right-6 sm:right-8 text-[9px] uppercase tracking-[0.2em] text-white/30">
-                  Ready for uplink
+                <div className="mt-6 flex items-center space-x-2 text-[10px] uppercase tracking-[0.2em] text-white/40 font-mono">
+                  <span>Or switch tab to paste text</span>
                 </div>
               </div>
             )}

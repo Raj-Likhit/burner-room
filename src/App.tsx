@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Navigation } from './components/Navigation';
 import { PinDisplay } from './components/PinDisplay';
@@ -12,12 +12,18 @@ import { PickupView } from './components/PickupView';
 import { CountdownTimer } from './components/CountdownTimer';
 import { Footer } from './components/Footer';
 import { SpotlightOnboarding } from './components/SpotlightOnboarding';
-import { BurnerFileMetadata, PayloadType, ShareMode } from './types';
-import { Flame } from 'lucide-react';
+import { OfflineBanner } from './components/OfflineBanner';
+import { BurnerFileMetadata, EncryptedBundle, PayloadType, ShareMode, StoredSenderSession } from './types';
+import { updateTabTitle, setFavicon } from './lib/favicon';
+import { BurnerApi, normalizeApiError } from './lib/api';
+import { Flame, ShieldCheck, Activity, CheckCircle2, AlertTriangle, ShieldAlert } from 'lucide-react';
+
+const SESSION_STORAGE_KEY = 'burner_room_active_session_v2';
 
 export default function App() {
   const [mode, setMode] = useState<'drop' | 'pickup'>('drop');
   const [pin, setPin] = useState<string>('----');
+  const [senderToken, setSenderToken] = useState<string>('');
   const [ttlSeconds, setTtlSeconds] = useState<number>(600);
   const [expiresAt, setExpiresAt] = useState<number>(Date.now() + 600 * 1000);
   const [isUploaded, setIsUploaded] = useState<boolean>(false);
@@ -26,9 +32,136 @@ export default function App() {
   const [uploadedFileSize, setUploadedFileSize] = useState<number | undefined>();
   const [uploadedTextPreview, setUploadedTextPreview] = useState<string | undefined>();
   const [shareMode, setShareMode] = useState<ShareMode>('burn_on_read');
+  const [maxReads, setMaxReads] = useState<number | undefined>();
+  const [e2eKeyString, setE2eKeyString] = useState<string | undefined>();
+  const [liveReadCount, setLiveReadCount] = useState<number>(0);
+  const [lastEventMessage, setLastEventMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [burnedNotice, setBurnedNotice] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
+  const [isOffline, setIsOffline] = useState<boolean>(!navigator.onLine);
+
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Online / Offline network event listeners
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOffline(false);
+      updateTabTitle(isUploaded ? 'armed' : 'idle', pin);
+    };
+    const handleOffline = () => {
+      setIsOffline(true);
+      updateTabTitle('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [isUploaded, pin]);
+
+  // Dynamic Browser Tab Title & Favicon synchronization
+  useEffect(() => {
+    if (isOffline) {
+      updateTabTitle('offline');
+      return;
+    }
+    if (burnedNotice) {
+      updateTabTitle('burned');
+      return;
+    }
+    if (isUploaded && pin && pin !== '----') {
+      const remainingSecs = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+      updateTabTitle('armed', pin, remainingSecs);
+    } else {
+      updateTabTitle('idle');
+    }
+  }, [isUploaded, pin, expiresAt, burnedNotice, isOffline]);
+
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if typing in an input or textarea
+      const target = e.target as HTMLElement;
+      const isInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setMode((prev) => (prev === 'drop' ? 'pickup' : 'drop'));
+      } else if (e.altKey && e.key.toLowerCase() === 'n' && !isUploaded) {
+        e.preventDefault();
+        fetchNewSession();
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [isUploaded]);
+
+  // Restore sender session from sessionStorage if present (Sender-side reconnect QoL)
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (saved) {
+        const parsed: StoredSenderSession = JSON.parse(saved);
+        if (parsed.expiresAt > Date.now()) {
+          setPin(parsed.pin);
+          setSenderToken(parsed.senderToken);
+          setExpiresAt(parsed.expiresAt);
+          setTtlSeconds(parsed.ttlSeconds);
+          setIsUploaded(parsed.isUploaded);
+          setUploadedType(parsed.uploadedType || null);
+          setUploadedFileName(parsed.uploadedFileName);
+          setUploadedFileSize(parsed.uploadedFileSize);
+          setUploadedTextPreview(parsed.uploadedTextPreview);
+          setShareMode(parsed.shareMode);
+          setMaxReads(parsed.maxReads);
+          setE2eKeyString(parsed.e2eKeyString);
+        } else {
+          sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Save active session state whenever it updates
+  useEffect(() => {
+    if (isUploaded && pin !== '----' && senderToken && expiresAt > Date.now()) {
+      const sessionState: StoredSenderSession = {
+        pin,
+        senderToken,
+        expiresAt,
+        ttlSeconds,
+        isUploaded,
+        uploadedType: uploadedType || undefined,
+        uploadedFileName,
+        uploadedFileSize,
+        uploadedTextPreview,
+        shareMode,
+        maxReads,
+        e2eKeyString,
+      };
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionState));
+    }
+  }, [
+    isUploaded,
+    pin,
+    senderToken,
+    expiresAt,
+    ttlSeconds,
+    uploadedType,
+    uploadedFileName,
+    uploadedFileSize,
+    uploadedTextPreview,
+    shareMode,
+    maxReads,
+    e2eKeyString,
+  ]);
 
   // Check URL query parameters for direct ?pin=4921 pairing and check first-time visitor status
   useEffect(() => {
@@ -38,17 +171,67 @@ export default function App() {
       setMode('pickup');
     }
 
-    // Check if user has completed or skipped onboarding previously
     try {
       const hasSeenOnboarding = localStorage.getItem('burner_has_seen_onboarding');
       if (!hasSeenOnboarding && !queryPin) {
-        // Show onboarding modal for first-time visitor
         setShowOnboarding(true);
       }
     } catch {
       // LocalStorage fallback
     }
   }, []);
+
+  // Real-Time Server-Sent Events (SSE) listener for active uploaded sessions
+  useEffect(() => {
+    if (!isUploaded || !pin || pin === '----' || !senderToken) {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      return;
+    }
+
+    // Connect to SSE stream
+    const sseUrl = `/api/events/${pin}?senderToken=${senderToken}`;
+    const es = new EventSource(sseUrl);
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'pickup') {
+          setLiveReadCount(data.readCount || 1);
+          if (data.isBurned) {
+            setLastEventMessage('🔥 Recipient retrieved payload! Session permanently burned.');
+            setBurnedNotice('Payload retrieved & incinerated from RAM by recipient.');
+            sessionStorage.removeItem(SESSION_STORAGE_KEY);
+            setTimeout(() => {
+              fetchNewSession();
+            }, 3000);
+          } else {
+            setLastEventMessage(`Recipient access #${data.readCount} verified.`);
+          }
+        } else if (data.type === 'burned' || data.type === 'expired') {
+          setBurnedNotice('Payload cleared from memory.');
+          sessionStorage.removeItem(SESSION_STORAGE_KEY);
+          setTimeout(() => {
+            fetchNewSession();
+          }, 2000);
+        }
+      } catch (err) {
+        console.error('SSE parse error', err);
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+    };
+
+    return () => {
+      es.close();
+      eventSourceRef.current = null;
+    };
+  }, [isUploaded, pin, senderToken]);
 
   const handleCloseOnboarding = () => {
     setShowOnboarding(false);
@@ -64,30 +247,33 @@ export default function App() {
   };
 
   // Fetch or generate fresh session PIN from server
-  const fetchNewSession = useCallback(async (customTtl?: number) => {
+  const fetchNewSession = useCallback(async (customTtl?: number, requestedCustomPin?: string) => {
     setIsLoading(true);
     const activeTtl = customTtl || ttlSeconds;
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+
     try {
-      const res = await fetch(`/api/session?ttl=${activeTtl}`);
-      if (res.ok) {
-        const data = await res.json();
-        setPin(data.pin);
-        setExpiresAt(data.expiresAt);
-        if (data.ttlSeconds) {
-          setTtlSeconds(data.ttlSeconds);
-        }
-        setIsUploaded(false);
-        setUploadedType(null);
-        setUploadedFileName(undefined);
-        setUploadedFileSize(undefined);
-        setUploadedTextPreview(undefined);
-        setBurnedNotice(null);
+      const data = await BurnerApi.createSession(activeTtl, requestedCustomPin);
+      setPin(data.pin);
+      setSenderToken(data.senderToken);
+      setExpiresAt(data.expiresAt);
+      if (data.ttlSeconds) {
+        setTtlSeconds(data.ttlSeconds);
       }
+      setIsUploaded(false);
+      setUploadedType(null);
+      setUploadedFileName(undefined);
+      setUploadedFileSize(undefined);
+      setUploadedTextPreview(undefined);
+      setE2eKeyString(undefined);
+      setLiveReadCount(0);
+      setLastEventMessage(null);
+      setBurnedNotice(null);
     } catch (e) {
       console.error('Failed to fetch new session', e);
-      // Fallback local PIN
-      const localPin = Math.floor(1000 + Math.random() * 9000).toString();
+      const localPin = requestedCustomPin || Math.floor(1000 + Math.random() * 9000).toString();
       setPin(localPin);
+      setSenderToken(Math.random().toString(36).substring(2));
       setExpiresAt(Date.now() + activeTtl * 1000);
     } finally {
       setIsLoading(false);
@@ -103,8 +289,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchNewSession();
-  }, []);
+    if (!isUploaded && pin === '----') {
+      fetchNewSession();
+    }
+  }, [isUploaded, pin, fetchNewSession]);
 
   // Handle Drop action
   const handleDropPayload = async (
@@ -112,63 +300,75 @@ export default function App() {
     textContent?: string,
     fileMeta?: BurnerFileMetadata,
     modeSetting?: ShareMode,
-    ttlSetting?: number
+    ttlSetting?: number,
+    encryptedBundle?: EncryptedBundle,
+    e2eKeyStr?: string,
+    maxReadsSetting?: number,
+    customPin?: string
   ) => {
     setIsLoading(true);
     const activeShareMode = modeSetting || shareMode;
     const activeTtl = ttlSetting || ttlSeconds;
+    const activeMaxReads = maxReadsSetting || maxReads;
+    const activePin = customPin || pin;
+
     try {
-      const res = await fetch('/api/drop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pin,
-          type,
-          shareMode: activeShareMode,
-          ttlSeconds: activeTtl,
-          textContent,
-          file: fileMeta,
-        }),
+      const data = await BurnerApi.dropPayload({
+        pin: activePin,
+        senderToken,
+        type,
+        shareMode: activeShareMode,
+        maxReads: activeMaxReads,
+        ttlSeconds: activeTtl,
+        textContent,
+        file: fileMeta,
+        encryptedBundle,
       });
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      if (data.success) {
+        setPin(activePin);
         setIsUploaded(true);
         setUploadedType(type);
         setShareMode(activeShareMode);
+        setMaxReads(activeMaxReads);
         setTtlSeconds(activeTtl);
         setUploadedFileName(fileMeta?.name);
         setUploadedFileSize(fileMeta?.size);
         setUploadedTextPreview(textContent);
+        if (e2eKeyStr) {
+          setE2eKeyString(e2eKeyStr);
+        }
+        if (data.senderToken) {
+          setSenderToken(data.senderToken);
+        }
         if (data.expiresAt) {
           setExpiresAt(data.expiresAt);
         }
-      } else {
-        alert(data.error || 'Failed to upload payload.');
       }
-    } catch (e) {
-      console.error('Drop failed', e);
-      alert('Error uploading payload.');
+    } catch (e: any) {
+      const normalized = normalizeApiError(e);
+      console.error('Drop failed', normalized);
+      throw normalized;
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Handle Manual Burn from Sender
+  // Handle Manual Burn from Sender (Protected with senderToken)
   const handleManualBurn = async () => {
     setIsLoading(true);
     try {
-      await fetch('/api/burn', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin }),
-      });
-      setBurnedNotice('Payload destroyed immediately.');
-      setTimeout(() => {
-        fetchNewSession();
-      }, 1500);
-    } catch (e) {
-      console.error('Burn failed', e);
+      const data = await BurnerApi.burnPayload(pin, senderToken);
+      if (data.success) {
+        setBurnedNotice('Payload incinerated immediately by sender token.');
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        setTimeout(() => {
+          fetchNewSession();
+        }, 1500);
+      }
+    } catch (e: any) {
+      const normalized = normalizeApiError(e);
+      console.error('Burn failed', normalized);
     } finally {
       setIsLoading(false);
     }
@@ -178,6 +378,7 @@ export default function App() {
   const handleTimerExpire = () => {
     if (isUploaded) {
       setBurnedNotice('TTL Expired: Payload incinerated automatically.');
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
       setTimeout(() => {
         fetchNewSession();
       }, 2000);
@@ -185,7 +386,10 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen w-full bg-[#0D0D0D] text-[#F5F5F5] flex flex-col font-sans select-none antialiased">
+    <div className="min-h-[100dvh] w-full bg-[#0D0D0D] text-[#F5F5F5] flex flex-col font-sans select-none antialiased">
+      {/* Offline Status Banner */}
+      <OfflineBanner isOffline={isOffline} onRetry={() => window.location.reload()} />
+
       {/* Top Header Nav */}
       <Navigation
         mode={mode}
@@ -194,21 +398,22 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col items-center justify-center px-4 sm:px-12 py-10 sm:py-16">
-        <div className="w-full max-w-3xl flex flex-col items-center space-y-12 sm:space-y-16">
+      <main className="flex-1 flex flex-col items-center justify-center px-4 sm:px-12 py-8 sm:py-16">
+        <div className="w-full max-w-3xl flex flex-col items-center space-y-10 sm:space-y-14">
           <AnimatePresence mode="wait">
             {mode === 'drop' ? (
               <motion.div
                 key="drop-mode"
-                initial={{ opacity: 0, y: 16, filter: 'blur(4px)' }}
-                animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-                exit={{ opacity: 0, y: -16, filter: 'blur(4px)' }}
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -16 }}
                 transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-                className="w-full flex flex-col items-center space-y-12 sm:space-y-16"
+                className="w-full flex flex-col items-center space-y-8 sm:space-y-12"
               >
                 {/* Centerpiece 4-Digit Session PIN */}
                 <PinDisplay
                   pin={pin}
+                  e2eKeyString={e2eKeyString}
                   onRefreshPin={() => fetchNewSession()}
                   isLocked={isUploaded}
                   subtitle={isUploaded ? 'Active Uplink Key' : 'Session Access Key'}
@@ -221,7 +426,7 @@ export default function App() {
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.95 }}
                     transition={{ duration: 0.25 }}
-                    className="p-3 px-6 rounded-xl bg-[#FF3B30]/10 border border-[#FF3B30]/30 text-[#FF3B30] text-xs flex items-center space-x-2 font-mono"
+                    className="p-3 px-6 rounded-2xl bg-[#FF3B30]/10 border border-[#FF3B30]/30 text-[#FF3B30] text-xs flex items-center space-x-2 font-mono shadow-[0_0_15px_rgba(255,59,48,0.2)]"
                   >
                     <Flame className="w-4 h-4 animate-pulse" />
                     <span>{burnedNotice}</span>
@@ -231,6 +436,7 @@ export default function App() {
                 {/* Dropzone / Upload State */}
                 <DropZone
                   pin={pin}
+                  senderToken={senderToken}
                   isUploaded={isUploaded}
                   uploadedType={uploadedType}
                   uploadedFileName={uploadedFileName}
@@ -238,12 +444,21 @@ export default function App() {
                   uploadedTextPreview={uploadedTextPreview}
                   shareMode={shareMode}
                   setShareMode={setShareMode}
+                  maxReads={maxReads}
+                  setMaxReads={setMaxReads}
                   ttlSeconds={ttlSeconds}
                   setTtlSeconds={handleTtlChange}
+                  e2eKeyString={e2eKeyString}
+                  setE2eKeyString={setE2eKeyString}
+                  liveReadCount={liveReadCount}
+                  lastEventMessage={lastEventMessage}
                   onDropPayload={handleDropPayload}
                   onManualBurn={handleManualBurn}
                   onReset={() => fetchNewSession()}
                   isLoading={isLoading}
+                  onRequestCustomPin={async (customPin) => {
+                    await fetchNewSession(ttlSeconds, customPin);
+                  }}
                 />
 
                 {/* Self-Destruct Sequence Timer */}
@@ -257,14 +472,15 @@ export default function App() {
             ) : (
               <motion.div
                 key="pickup-mode"
-                initial={{ opacity: 0, y: 16, filter: 'blur(4px)' }}
-                animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-                exit={{ opacity: 0, y: -16, filter: 'blur(4px)' }}
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -16 }}
                 transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                 className="w-full flex flex-col items-center"
               >
                 <PickupView
                   initialPin={new URLSearchParams(window.location.search).get('pin') || ''}
+                  initialKey={window.location.hash.replace('#key=', '')}
                   onPickupSuccess={(payload) => {
                     console.log('Payload retrieved:', payload);
                   }}
