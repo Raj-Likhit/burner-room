@@ -1,18 +1,15 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   KeyRound,
   Flame,
   Clock,
-  ArrowRight,
   X,
   Zap,
   Sparkles,
   ChevronRight,
-  ShieldCheck,
-  Users,
+  ChevronLeft,
   Lock,
-  Compass,
 } from 'lucide-react';
 
 interface SpotlightOnboardingProps {
@@ -38,7 +35,7 @@ const STEPS: StepConfig[] = [
     badge: 'Step 1 • Dynamic Session Key',
     title: '4-Digit Ephemeral PIN',
     description:
-      'Every drop is assigned a non-colliding numeric key. Click anytime to copy the code or generate a fresh key with the refresh icon.',
+      'Every drop is assigned a non-colliding numeric key. Tap anytime to copy or use the refresh button to generate a new key.',
     icon: KeyRound,
     accentColor: '#FFFFFF',
     positionPreference: 'bottom',
@@ -49,7 +46,7 @@ const STEPS: StepConfig[] = [
     badge: 'Step 2 • Zero-Trace Payload',
     title: 'Universal Drop & Text Buffer',
     description:
-      'Drag and drop files up to 50MB or switch to "Paste Text" for credentials and notes. All uploads live purely in RAM.',
+      'Upload files up to 50MB or switch to "Paste Text" for confidential snippets and credentials. All data is RAM-only.',
     icon: Zap,
     accentColor: '#FF3B30',
     positionPreference: 'bottom',
@@ -58,9 +55,9 @@ const STEPS: StepConfig[] = [
     id: 'ttl',
     targetId: 'ttl-selector-container',
     badge: 'Step 3 • Auto-Destruct Lifetime',
-    title: 'Customizable TTL (Up to 1 Hour)',
+    title: 'Customizable TTL Lifespan',
     description:
-      'Choose quick presets (5m, 10m, 15m, 30m, 1h) or click the slider icon for custom 1-60 minute intervals before automatic memory wipe.',
+      'Select quick presets (5m to 1h) or use the custom slider to set the exact auto-purge countdown before memory incineration.',
     icon: Clock,
     accentColor: '#FF9500',
     positionPreference: 'bottom',
@@ -71,7 +68,7 @@ const STEPS: StepConfig[] = [
     badge: 'Step 4 • Read Policy',
     title: '1-Time Read vs Multi-Share',
     description:
-      'Toggle between "1-Time Read" (incinerates instantly on first retrieval) and "Multi-Share" (allows multiple devices to fetch before the TTL timer expires).',
+      'Choose "1-Time Read" (destroys instantly upon first unlock) or "Multi-Share" (allows multiple retrievals before the TTL timer expires).',
     icon: Lock,
     accentColor: '#FF3B30',
     positionPreference: 'bottom',
@@ -82,7 +79,7 @@ const STEPS: StepConfig[] = [
     badge: 'Step 5 • Real-Time Purge Clock',
     title: 'Active Auto-Purge Countdown',
     description:
-      'Monitors real-time remaining lifespan. When this reaches zero, all payload buffers are destroyed unconditionally.',
+      'Tracks remaining session lifespan in real-time. When the countdown hits zero, payload buffers are destroyed permanently.',
     icon: Flame,
     accentColor: '#FF3B30',
     positionPreference: 'top',
@@ -104,58 +101,85 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
 }) => {
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<ElementRect | null>(null);
-  const [isWindowSmall, setIsWindowSmall] = useState(false);
+  const [windowDimensions, setWindowDimensions] = useState({
+    width: typeof window !== 'undefined' ? window.innerWidth : 390,
+    height: typeof window !== 'undefined' ? window.innerHeight : 844,
+  });
 
+  const touchStartX = useRef<number | null>(null);
   const step = STEPS[currentStepIndex];
   const StepIcon = step.icon;
+
+  const isMobile = windowDimensions.width < 640;
 
   // Measure targeted element
   const updateTargetRect = useCallback(() => {
     if (!isOpen) return;
 
-    setIsWindowSmall(window.innerWidth < 640);
+    const winW = window.innerWidth;
+    const winH = window.innerHeight;
+    setWindowDimensions({ width: winW, height: winH });
+
     const targetElement = document.getElementById(step.targetId);
 
     if (targetElement) {
-      // Scroll into view if needed gently
-      targetElement.scrollIntoView({
-        behavior: 'smooth',
-        block: 'nearest',
-        inline: 'nearest',
-      });
-
       const rect = targetElement.getBoundingClientRect();
-      // Add comfortable padding around the highlighted element
-      const padding = 10;
+      const padding = isMobile ? 6 : 10;
+
       setTargetRect({
         top: Math.max(0, rect.top - padding),
         left: Math.max(0, rect.left - padding),
-        width: rect.width + padding * 2,
+        width: Math.min(winW, rect.width + padding * 2),
         height: rect.height + padding * 2,
         bottom: rect.bottom + padding,
         right: rect.right + padding,
       });
     } else {
-      // Fallback center if element not in DOM (e.g., hidden state)
       setTargetRect(null);
     }
-  }, [isOpen, step.targetId]);
+  }, [isOpen, step.targetId, isMobile]);
 
+  // Smooth scroll target into comfortable view on step change
   useEffect(() => {
+    if (!isOpen) return;
+
+    const targetElement = document.getElementById(step.targetId);
+    if (targetElement) {
+      targetElement.scrollIntoView({
+        behavior: 'smooth',
+        block: isMobile ? 'center' : 'nearest',
+        inline: 'nearest',
+      });
+      // Re-measure after scroll animation starts and finishes
+      const t1 = setTimeout(updateTargetRect, 50);
+      const t2 = setTimeout(updateTargetRect, 200);
+      const t3 = setTimeout(updateTargetRect, 450);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
+    } else {
+      updateTargetRect();
+    }
+  }, [isOpen, step.targetId, currentStepIndex, isMobile, updateTargetRect]);
+
+  // Window resize & scroll listener
+  useEffect(() => {
+    if (!isOpen) return;
+
     updateTargetRect();
     const handleResize = () => updateTargetRect();
     const handleScroll = () => updateTargetRect();
 
-    window.addEventListener('resize', handleResize);
-    window.addEventListener('scroll', handleScroll);
-    const interval = setInterval(updateTargetRect, 250);
+    window.addEventListener('resize', handleResize, { passive: true });
+    window.addEventListener('scroll', handleScroll, { passive: true });
 
     return () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleScroll);
-      clearInterval(interval);
     };
-  }, [updateTargetRect]);
+  }, [isOpen, updateTargetRect]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -179,55 +203,114 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, currentStepIndex, onClose]);
 
-  // Calculate tooltip popover positioning
-  const calculateTooltipPosition = () => {
-    if (!targetRect || isWindowSmall) {
-      // Centered or fixed bottom on mobile screens
+  // Handle touch swipes on mobile
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0].clientX;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX.current === null) return;
+    const touchEndX = e.changedTouches[0].clientX;
+    const diff = touchStartX.current - touchEndX;
+
+    // Threshold of 50px for swipe gesture
+    if (Math.abs(diff) > 50) {
+      if (diff > 0) {
+        // Swiped left -> Next
+        if (currentStepIndex < STEPS.length - 1) {
+          setCurrentStepIndex((prev) => prev + 1);
+        } else {
+          onClose();
+        }
+      } else {
+        // Swiped right -> Prev
+        if (currentStepIndex > 0) {
+          setCurrentStepIndex((prev) => prev - 1);
+        }
+      }
+    }
+    touchStartX.current = null;
+  };
+
+  // Determine whether card on mobile should sit at top or bottom
+  const shouldDockTopOnMobile = Boolean(
+    targetRect && targetRect.top + targetRect.height / 2 > windowDimensions.height / 2
+  );
+
+  // Calculate position styles for desktop vs mobile
+  const getCardStyle = (): React.CSSProperties => {
+    if (isMobile) {
+      // Mobile: Clean inset-x docking at top or bottom with safe area padding
+      if (shouldDockTopOnMobile) {
+        return {
+          position: 'fixed',
+          top: 'max(14px, env(safe-area-inset-top, 14px))',
+          left: '12px',
+          right: '12px',
+          margin: '0 auto',
+          maxWidth: 'calc(100vw - 24px)',
+        };
+      }
       return {
-        left: '50%',
-        top: '50%',
-        transform: 'translate(-50%, -50%)',
+        position: 'fixed',
+        bottom: 'max(16px, env(safe-area-inset-bottom, 16px))',
+        left: '12px',
+        right: '12px',
+        margin: '0 auto',
+        maxWidth: 'calc(100vw - 24px)',
       };
     }
 
-    const popoverWidth = 380;
-    const popoverHeight = 240;
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
+    // Desktop: Smart positioning relative to target
+    if (!targetRect) {
+      return {
+        position: 'fixed',
+        left: '50%',
+        top: '50%',
+        marginLeft: '-195px',
+        marginTop: '-120px',
+        width: '390px',
+      };
+    }
 
-    // Center horizontally with respect to target
+    const popoverWidth = 390;
+    const popoverHeight = 220;
+    const viewportWidth = windowDimensions.width;
+    const viewportHeight = windowDimensions.height;
+
     let left = targetRect.left + targetRect.width / 2 - popoverWidth / 2;
-    // Keep inside viewport horizontal boundaries
-    left = Math.max(20, Math.min(left, viewportWidth - popoverWidth - 20));
+    left = Math.max(16, Math.min(left, viewportWidth - popoverWidth - 16));
 
     let top = 0;
-    if (step.positionPreference === 'top' || targetRect.bottom + popoverHeight + 20 > viewportHeight) {
-      // Place above target
-      top = Math.max(20, targetRect.top - popoverHeight - 16);
+    if (
+      step.positionPreference === 'top' ||
+      targetRect.bottom + popoverHeight + 20 > viewportHeight
+    ) {
+      top = Math.max(16, targetRect.top - popoverHeight - 14);
     } else {
-      // Place below target
-      top = Math.min(viewportHeight - popoverHeight - 20, targetRect.bottom + 16);
+      top = Math.min(viewportHeight - popoverHeight - 16, targetRect.bottom + 14);
     }
 
     return {
+      position: 'fixed',
       left: `${left}px`,
       top: `${top}px`,
-      transform: 'none',
+      width: `${popoverWidth}px`,
     };
   };
 
-  const tooltipStyle = calculateTooltipPosition();
+  const cardStyle = getCardStyle();
 
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-50 pointer-events-auto select-none overflow-hidden">
+        <div className="fixed inset-0 z-50 pointer-events-auto select-none overflow-hidden touch-none">
           {/* Dimmed backdrop with smooth SVG cutout hole around target */}
           <motion.svg
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.35, ease: 'easeInOut' }}
+            transition={{ duration: 0.3, ease: 'easeInOut' }}
             className="absolute inset-0 w-full h-full pointer-events-auto"
             onClick={onClose}
           >
@@ -242,8 +325,8 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
                     y={targetRect.top}
                     width={targetRect.width}
                     height={targetRect.height}
-                    rx="16"
-                    ry="16"
+                    rx={isMobile ? '12' : '16'}
+                    ry={isMobile ? '12' : '16'}
                     fill="black"
                   />
                 )}
@@ -256,7 +339,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
               y="0"
               width="100%"
               height="100%"
-              fill="rgba(0, 0, 0, 0.78)"
+              fill="rgba(0, 0, 0, 0.82)"
               mask="url(#spotlight-mask)"
             />
           </motion.svg>
@@ -274,40 +357,54 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
               }}
               transition={{
                 type: 'spring',
-                damping: 28,
+                damping: 26,
                 stiffness: 280,
               }}
-              className="absolute pointer-events-none rounded-2xl border-2 border-[#FF3B30] shadow-[0_0_24px_rgba(255,59,48,0.45)] z-40"
+              className="absolute pointer-events-none rounded-xl sm:rounded-2xl border-2 border-[#FF3B30] shadow-[0_0_20px_rgba(255,59,48,0.5)] z-40"
             >
               {/* Corner accents */}
-              <span className="absolute -top-1 -left-1 w-2.5 h-2.5 border-t-2 border-l-2 border-white"></span>
-              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 border-t-2 border-r-2 border-white"></span>
-              <span className="absolute -bottom-1 -left-1 w-2.5 h-2.5 border-b-2 border-l-2 border-white"></span>
-              <span className="absolute -bottom-1 -right-1 w-2.5 h-2.5 border-b-2 border-r-2 border-white"></span>
+              <span className="absolute -top-1 -left-1 w-2 h-2 sm:w-2.5 sm:h-2.5 border-t-2 border-l-2 border-white"></span>
+              <span className="absolute -top-1 -right-1 w-2 h-2 sm:w-2.5 sm:h-2.5 border-t-2 border-r-2 border-white"></span>
+              <span className="absolute -bottom-1 -left-1 w-2 h-2 sm:w-2.5 sm:h-2.5 border-b-2 border-l-2 border-white"></span>
+              <span className="absolute -bottom-1 -right-1 w-2 h-2 sm:w-2.5 sm:h-2.5 border-b-2 border-r-2 border-white"></span>
             </motion.div>
           )}
 
-          {/* Smooth Moving Tour Tooltip Box */}
+          {/* Refined Tour Tooltip Box with Mobile Viewport Containment */}
           <motion.div
-            layoutId="spotlight-card-box"
-            style={tooltipStyle}
-            initial={{ opacity: 0, scale: 0.92, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.92, y: 10 }}
+            key={`step-${step.id}`}
+            style={cardStyle}
+            initial={{
+              opacity: 0,
+              y: isMobile ? (shouldDockTopOnMobile ? -14 : 14) : 8,
+              scale: 0.98,
+            }}
+            animate={{
+              opacity: 1,
+              y: 0,
+              scale: 1,
+            }}
+            exit={{
+              opacity: 0,
+              y: isMobile ? (shouldDockTopOnMobile ? -14 : 14) : 8,
+              scale: 0.98,
+            }}
             transition={{
               type: 'spring',
-              damping: 26,
-              stiffness: 280,
+              damping: 28,
+              stiffness: 320,
             }}
-            className="absolute z-50 w-[92vw] sm:w-[390px] bg-[#141414] border border-white/15 rounded-2xl sm:rounded-3xl p-5 sm:p-6 shadow-[0_16px_50px_rgba(0,0,0,0.8)] backdrop-blur-xl"
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+            className="z-50 bg-[#141414]/95 border border-white/20 rounded-2xl sm:rounded-3xl p-4 sm:p-6 shadow-[0_16px_50px_rgba(0,0,0,0.9)] backdrop-blur-2xl pointer-events-auto"
           >
-            {/* Top Bar: Step & Skip */}
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center space-x-2">
-                <div className="w-7 h-7 rounded-xl bg-white/[0.06] border border-white/10 flex items-center justify-center">
-                  <StepIcon className="w-3.5 h-3.5 text-[#FF3B30]" />
+            {/* Top Bar: Step Badge & Skip Tour Button */}
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="flex items-center space-x-2 min-w-0">
+                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg sm:rounded-xl bg-white/[0.08] border border-white/10 flex items-center justify-center shrink-0">
+                  <StepIcon className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#FF3B30]" />
                 </div>
-                <span className="text-[10px] uppercase tracking-[0.2em] font-mono text-[#FF3B30] font-semibold">
+                <span className="text-[10px] sm:text-[11px] uppercase tracking-[0.16em] sm:tracking-[0.2em] font-mono text-[#FF3B30] font-semibold truncate">
                   {step.badge}
                 </span>
               </div>
@@ -315,25 +412,25 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
               <button
                 id="spotlight-skip-btn"
                 onClick={onClose}
-                className="flex items-center space-x-1 text-[10px] uppercase tracking-wider font-mono text-white/40 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/5 cursor-pointer"
+                className="shrink-0 flex items-center space-x-1 text-[10px] uppercase tracking-wider font-mono text-white/50 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/10 cursor-pointer"
               >
-                <span>Skip Tour</span>
+                <span>Skip</span>
                 <X className="w-3 h-3" />
               </button>
             </div>
 
-            {/* Step Body */}
-            <div className="space-y-2 mb-6">
-              <h4 className="text-base sm:text-lg font-light text-white tracking-tight">
+            {/* Step Content: Title & Description */}
+            <div className="space-y-1 sm:space-y-1.5 mb-4 sm:mb-5">
+              <h4 className="text-sm sm:text-base font-medium text-white tracking-tight">
                 {step.title}
               </h4>
-              <p className="text-xs sm:text-sm text-white/60 font-light leading-relaxed">
+              <p className="text-xs sm:text-[13px] text-white/70 font-normal leading-relaxed">
                 {step.description}
               </p>
             </div>
 
-            {/* Footer: Progress Dots & Next / Finish */}
-            <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between">
+            {/* Footer: Progress Indicator Dots & Action Buttons */}
+            <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between gap-2">
               {/* Step indicator dots */}
               <div className="flex items-center space-x-1.5">
                 {STEPS.map((_, idx) => (
@@ -341,24 +438,26 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
                     key={idx}
                     id={`spotlight-dot-${idx}`}
                     onClick={() => setCurrentStepIndex(idx)}
+                    aria-label={`Go to step ${idx + 1}`}
                     className={`h-1 rounded-full transition-all duration-300 cursor-pointer ${
                       currentStepIndex === idx
-                        ? 'w-5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.7)]'
+                        ? 'w-4 sm:w-5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.8)]'
                         : 'w-1.5 bg-white/20 hover:bg-white/40'
                     }`}
                   />
                 ))}
               </div>
 
-              {/* Navigation Actions */}
-              <div className="flex items-center space-x-2">
+              {/* Navigation Controls */}
+              <div className="flex items-center space-x-1.5 sm:space-x-2">
                 {currentStepIndex > 0 && (
                   <button
                     id="spotlight-prev-btn"
                     onClick={() => setCurrentStepIndex((prev) => prev - 1)}
-                    className="px-3 py-1.5 rounded-lg text-xs uppercase tracking-wider font-mono text-white/50 hover:text-white transition-colors cursor-pointer"
+                    className="flex items-center space-x-1 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-lg text-xs font-mono text-white/60 hover:text-white transition-colors cursor-pointer"
                   >
-                    Back
+                    <ChevronLeft className="w-3.5 h-3.5 sm:hidden" />
+                    <span className="hidden sm:inline uppercase tracking-wider">Back</span>
                   </button>
                 )}
 
@@ -366,7 +465,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
                   <button
                     id="spotlight-next-btn"
                     onClick={() => setCurrentStepIndex((prev) => prev + 1)}
-                    className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-white text-black text-xs uppercase tracking-[0.18em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all shadow-sm cursor-pointer"
+                    className="flex items-center space-x-1 sm:space-x-1.5 px-3.5 py-2 sm:px-4 sm:py-2 rounded-xl bg-white text-black text-xs uppercase tracking-[0.14em] sm:tracking-[0.18em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all shadow-sm cursor-pointer active:scale-95"
                   >
                     <span>Next</span>
                     <ChevronRight className="w-3.5 h-3.5" />
@@ -375,7 +474,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
                   <button
                     id="spotlight-finish-btn"
                     onClick={onClose}
-                    className="flex items-center space-x-1.5 px-5 py-2 rounded-xl bg-[#FF3B30] text-white text-xs uppercase tracking-[0.18em] font-semibold hover:bg-white hover:text-black transition-all shadow-[0_0_12px_rgba(255,59,48,0.4)] cursor-pointer"
+                    className="flex items-center space-x-1.5 px-4 py-2 sm:px-5 sm:py-2 rounded-xl bg-[#FF3B30] text-white text-xs uppercase tracking-[0.14em] sm:tracking-[0.18em] font-semibold hover:bg-white hover:text-black transition-all shadow-[0_0_14px_rgba(255,59,48,0.5)] cursor-pointer active:scale-95"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>Got It</span>
@@ -389,3 +488,4 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     </AnimatePresence>
   );
 };
+
