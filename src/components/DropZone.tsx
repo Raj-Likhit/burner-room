@@ -26,7 +26,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { BurnerFileMetadata, EncryptedBundle, PayloadType, ShareMode, ApiErrorDetail } from '../types';
-import { generateE2EKey, exportKeyToString, encryptData, sanitizeFilename } from '../lib/crypto';
+import { generateE2EKey, exportKeyToString, encryptData, sanitizeFilename, wrapKeyWithPin, getByteLengthFromDataUrl } from '../lib/crypto';
 import { BurnerApi, normalizeApiError, BurnerApiError } from '../lib/api';
 import { FileIconPreview } from './FileIconPreview';
 
@@ -185,6 +185,14 @@ export const DropZone: React.FC<DropZoneProps> = ({
     if (acceptedFiles.length === 0) return;
 
     const file = acceptedFiles[0];
+    if (file.size === 0) {
+      setApiError({
+        code: 'EMPTY_FILE',
+        message: 'The selected file is empty (0 bytes). Please choose a file with content.',
+        retryable: false,
+      });
+      return;
+    }
     if (file.size > 50 * 1024 * 1024) {
       setApiError({
         code: 'PAYLOAD_TOO_LARGE',
@@ -199,6 +207,15 @@ export const DropZone: React.FC<DropZoneProps> = ({
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = reader.result as string;
+        if (!dataUrl || dataUrl === 'data:' || dataUrl.length <= 15) {
+          setApiError({
+            code: 'FILE_READ_ERROR',
+            message: 'File content could not be read into memory (empty data received).',
+            retryable: true,
+          });
+          setIsProcessingFile(false);
+          return;
+        }
         setSelectedFile({ file, dataUrl });
         setIsProcessingFile(false);
       };
@@ -299,6 +316,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
     setApiError(null);
 
     const activeCustomPin = useCustomPin && customPinAvailability.available ? customPinInput : undefined;
+    const targetPin = (activeCustomPin || (pin && pin !== '----' && /^[0-9]{4}$/.test(pin) ? pin : undefined)) || Math.floor(1000 + Math.random() * 9000).toString();
 
     try {
       if (type === 'text') {
@@ -307,6 +325,12 @@ export const DropZone: React.FC<DropZoneProps> = ({
           const key = await generateE2EKey();
           const keyStr = await exportKeyToString(key);
           const encryptedBundle = await encryptData(textContent.trim(), key);
+          try {
+            const pinKeyBundle = await wrapKeyWithPin(keyStr, targetPin);
+            encryptedBundle.pinKeyBundle = pinKeyBundle;
+          } catch (wrapErr) {
+            console.warn('Could not wrap key with PIN', wrapErr);
+          }
           setE2eKeyString(keyStr);
           await onDropPayload(
             'text',
@@ -317,7 +341,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
             encryptedBundle,
             keyStr,
             maxReads,
-            activeCustomPin
+            targetPin
           );
         } else {
           setE2eKeyString(undefined);
@@ -330,15 +354,19 @@ export const DropZone: React.FC<DropZoneProps> = ({
             undefined,
             undefined,
             maxReads,
-            activeCustomPin
+            targetPin
           );
         }
       } else if (type === 'file' && selectedFile) {
         await simulateProgress();
         const sanitizedName = sanitizeFilename(selectedFile.file.name);
+        const effectiveSize = (selectedFile.file.size && selectedFile.file.size > 0)
+          ? selectedFile.file.size
+          : getByteLengthFromDataUrl(selectedFile.dataUrl);
+
         const fileMeta: BurnerFileMetadata = {
           name: sanitizedName,
-          size: selectedFile.file.size,
+          size: effectiveSize,
           type: selectedFile.file.type || 'application/octet-stream',
           dataUrl: selectedFile.dataUrl,
         };
@@ -348,11 +376,17 @@ export const DropZone: React.FC<DropZoneProps> = ({
           const keyStr = await exportKeyToString(key);
           const payloadString = JSON.stringify(fileMeta);
           const encryptedBundle = await encryptData(payloadString, key);
+          try {
+            const pinKeyBundle = await wrapKeyWithPin(keyStr, targetPin);
+            encryptedBundle.pinKeyBundle = pinKeyBundle;
+          } catch (wrapErr) {
+            console.warn('Could not wrap key with PIN', wrapErr);
+          }
           setE2eKeyString(keyStr);
 
           const securePlaceholderMeta: BurnerFileMetadata = {
             name: sanitizedName,
-            size: selectedFile.file.size,
+            size: effectiveSize,
             type: selectedFile.file.type || 'application/octet-stream',
           };
 
@@ -365,7 +399,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
             encryptedBundle,
             keyStr,
             maxReads,
-            activeCustomPin
+            targetPin
           );
         } else {
           setE2eKeyString(undefined);
@@ -378,7 +412,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
             undefined,
             undefined,
             maxReads,
-            activeCustomPin
+            targetPin
           );
         }
       }
@@ -1046,10 +1080,10 @@ export const DropZone: React.FC<DropZoneProps> = ({
                   <button
                     id="drop-selected-file-btn"
                     onClick={() => triggerArmCountdown('file')}
-                    disabled={isLoading || undoCountdown !== null}
-                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all cursor-pointer shadow-lg"
+                    disabled={isLoading || isProcessingFile || undoCountdown !== null}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all cursor-pointer shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <span>Arm File</span>
+                    <span>{isProcessingFile ? 'Reading File...' : 'Arm File'}</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
                 </div>

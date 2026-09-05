@@ -124,14 +124,24 @@ export const PinDisplay: React.FC<PinDisplayProps> = ({
         ctx.font = 'bold 24px monospace';
         ctx.fillText(`PIN: ${pin}`, canvas.width / 2, 465);
 
-        // Download
-        const a = document.createElement('a');
-        a.href = canvas.toDataURL('image/png');
-        a.download = `burner-room-pin-${pin}.png`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setIsDownloadingQr(false);
+        // Download as safe blob
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            setIsDownloadingQr(false);
+            return;
+          }
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = `burner-room-pin-${pin}.png`;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+          }, 2000);
+          setIsDownloadingQr(false);
+        }, 'image/png');
       };
       img.onerror = () => {
         setIsDownloadingQr(false);

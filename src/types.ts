@@ -20,10 +20,17 @@ export interface BurnerFileMetadata {
   dataUrl?: string; // May be encrypted or unencrypted data URL
 }
 
+export interface PinKeyBundle {
+  ciphertext: string;
+  iv: string;
+  salt: string;
+}
+
 export interface EncryptedBundle {
   ciphertext: string;
   iv: string;
   isEncrypted: boolean;
+  pinKeyBundle?: PinKeyBundle;
 }
 
 export interface BurnerPayload {

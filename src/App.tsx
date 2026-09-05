@@ -101,8 +101,43 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [isUploaded]);
 
+  // Fetch or generate fresh session PIN from server
+  const fetchNewSession = useCallback(async (customTtl?: number, requestedCustomPin?: string) => {
+    setIsLoading(true);
+    const activeTtl = customTtl || ttlSeconds;
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+
+    try {
+      const data = await BurnerApi.createSession(activeTtl, requestedCustomPin);
+      setPin(data.pin);
+      setSenderToken(data.senderToken);
+      setExpiresAt(data.expiresAt);
+      if (data.ttlSeconds) {
+        setTtlSeconds(data.ttlSeconds);
+      }
+      setIsUploaded(false);
+      setUploadedType(null);
+      setUploadedFileName(undefined);
+      setUploadedFileSize(undefined);
+      setUploadedTextPreview(undefined);
+      setE2eKeyString(undefined);
+      setLiveReadCount(0);
+      setLastEventMessage(null);
+      setBurnedNotice(null);
+    } catch (e) {
+      console.error('Failed to fetch new session', e);
+      const localPin = requestedCustomPin || Math.floor(1000 + Math.random() * 9000).toString();
+      setPin(localPin);
+      setSenderToken(Math.random().toString(36).substring(2));
+      setExpiresAt(Date.now() + activeTtl * 1000);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [ttlSeconds]);
+
   // Restore sender session from sessionStorage if present (Sender-side reconnect QoL)
   useEffect(() => {
+    let restored = false;
     try {
       const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
       if (saved) {
@@ -120,6 +155,7 @@ export default function App() {
           setShareMode(parsed.shareMode);
           setMaxReads(parsed.maxReads);
           setE2eKeyString(parsed.e2eKeyString);
+          restored = true;
         } else {
           sessionStorage.removeItem(SESSION_STORAGE_KEY);
         }
@@ -127,7 +163,11 @@ export default function App() {
     } catch {
       // ignore
     }
-  }, []);
+
+    if (!restored) {
+      fetchNewSession();
+    }
+  }, [fetchNewSession]);
 
   // Save active session state whenever it updates
   useEffect(() => {
@@ -245,40 +285,6 @@ export default function App() {
   const handleOpenOnboarding = () => {
     setShowOnboarding(true);
   };
-
-  // Fetch or generate fresh session PIN from server
-  const fetchNewSession = useCallback(async (customTtl?: number, requestedCustomPin?: string) => {
-    setIsLoading(true);
-    const activeTtl = customTtl || ttlSeconds;
-    sessionStorage.removeItem(SESSION_STORAGE_KEY);
-
-    try {
-      const data = await BurnerApi.createSession(activeTtl, requestedCustomPin);
-      setPin(data.pin);
-      setSenderToken(data.senderToken);
-      setExpiresAt(data.expiresAt);
-      if (data.ttlSeconds) {
-        setTtlSeconds(data.ttlSeconds);
-      }
-      setIsUploaded(false);
-      setUploadedType(null);
-      setUploadedFileName(undefined);
-      setUploadedFileSize(undefined);
-      setUploadedTextPreview(undefined);
-      setE2eKeyString(undefined);
-      setLiveReadCount(0);
-      setLastEventMessage(null);
-      setBurnedNotice(null);
-    } catch (e) {
-      console.error('Failed to fetch new session', e);
-      const localPin = requestedCustomPin || Math.floor(1000 + Math.random() * 9000).toString();
-      setPin(localPin);
-      setSenderToken(Math.random().toString(36).substring(2));
-      setExpiresAt(Date.now() + activeTtl * 1000);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [ttlSeconds]);
 
   const handleTtlChange = (newTtl: number) => {
     const clamped = Math.min(3600, Math.max(60, newTtl));

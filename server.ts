@@ -17,12 +17,17 @@ interface StoredPayload {
     name: string;
     size: number;
     type: string;
-    dataUrl: string;
+    dataUrl?: string;
   };
   encryptedBundle?: {
     ciphertext: string;
     iv: string;
     isEncrypted: boolean;
+    pinKeyBundle?: {
+      ciphertext: string;
+      iv: string;
+      salt: string;
+    };
   };
   createdAt: number;
   expiresAt: number;
@@ -588,7 +593,7 @@ async function startServer() {
       maxReads: validMaxReads,
       sizeBytes: estimatedBytes,
       textContent: type === "text" && !encryptedBundle ? textContent : undefined,
-      file: type === "file" && !encryptedBundle ? sanitizedFile : undefined,
+      file: type === "file" ? sanitizedFile : undefined,
       encryptedBundle: encryptedBundle?.isEncrypted ? encryptedBundle : undefined,
       createdAt: now,
       expiresAt,
@@ -847,11 +852,6 @@ async function startServer() {
       timestamp: now,
     });
 
-    // If file payload, attach safe headers
-    if (item.file) {
-      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(item.file.name)}"`);
-    }
-
     return res.json({
       success: true,
       isBurned,
@@ -874,6 +874,54 @@ async function startServer() {
         status: isBurned ? "retrieved" : "pending",
       },
     });
+  });
+
+  // 6b. Direct Binary Streaming Download Route
+  // Streams file binary directly via HTTP response with Content-Disposition: attachment
+  // Completely immune to browser iframe sandbox blob restrictions and premature blob revocation
+  app.post("/api/download-stream", (req: Request, res: Response) => {
+    try {
+      const { dataUrl, fileName, mimeType } = req.body;
+      if (!dataUrl || typeof dataUrl !== "string") {
+        return sendApiError(res, 400, "MISSING_DATA", "No file data provided for download stream.", false);
+      }
+
+      const safeName = sanitizeFilename(fileName || "burner-download");
+      let base64Content = dataUrl;
+      let detectedMime = mimeType || "application/octet-stream";
+
+      if (dataUrl.startsWith("data:")) {
+        const commaIdx = dataUrl.indexOf(",");
+        if (commaIdx !== -1) {
+          const header = dataUrl.slice(0, commaIdx);
+          base64Content = dataUrl.slice(commaIdx + 1);
+          const match = header.match(/data:([^;]+)/);
+          if (match && match[1]) {
+            detectedMime = match[1].trim();
+          }
+        }
+      }
+
+      const cleanBase64 = base64Content.replace(/[\s\r\n]+/g, "");
+      const buffer = Buffer.from(cleanBase64, "base64");
+
+      if (buffer.length === 0) {
+        return sendApiError(res, 400, "EMPTY_BUFFER", "Decoded file content is empty (0 bytes).", false);
+      }
+
+      res.setHeader("Content-Type", detectedMime);
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${encodeURIComponent(safeName)}"; filename*=UTF-8''${encodeURIComponent(safeName)}`
+      );
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+      res.setHeader("Pragma", "no-cache");
+      return res.send(buffer);
+    } catch (err: any) {
+      console.error("[Burner Room] Download stream error:", err);
+      return sendApiError(res, 500, "STREAM_FAILED", "Failed to stream download file.", false);
+    }
   });
 
   // 7. Manual Burn / Incinerate (Requires cryptographic senderToken ownership check)

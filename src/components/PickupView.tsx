@@ -20,9 +20,19 @@ import {
   AlertTriangle,
   RotateCcw,
   Zap,
+  ExternalLink,
 } from 'lucide-react';
 import { BurnerFileMetadata, BurnerPayload, CheckPayloadResponse, ApiErrorDetail } from '../types';
-import { importKeyFromString, decryptData, sanitizeFilename } from '../lib/crypto';
+import {
+  importKeyFromString,
+  decryptData,
+  sanitizeFilename,
+  downloadDataUrlAsBlob,
+  unwrapKeyWithPin,
+  getByteLengthFromDataUrl,
+  triggerServerStreamDownload,
+  openDataUrlInNewTab,
+} from '../lib/crypto';
 import { BurnerApi, normalizeApiError } from '../lib/api';
 import { FileIconPreview } from './FileIconPreview';
 import { ClipboardFallbackModal } from './ClipboardFallbackModal';
@@ -53,6 +63,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
   const [manualKeyInput, setManualKeyInput] = useState<string>('');
   const [needsManualKey, setNeedsManualKey] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+  const [isDownloaded, setIsDownloaded] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [fallbackModalText, setFallbackModalText] = useState<string | null>(null);
 
@@ -183,7 +194,18 @@ export const PickupView: React.FC<PickupViewProps> = ({
 
         // Handle End-to-End Decryption
         if (payload.encryptedBundle?.isEncrypted) {
-          if (!activeKeyStr) {
+          let resolvedKeyStr = activeKeyStr;
+
+          // If key is not in URL hash or manual input, automatically unwrap using PIN
+          if (!resolvedKeyStr && payload.encryptedBundle.pinKeyBundle && pinCode) {
+            try {
+              resolvedKeyStr = await unwrapKeyWithPin(payload.encryptedBundle.pinKeyBundle, pinCode);
+            } catch (unwrapErr) {
+              console.warn('Failed to unwrap master key with PIN:', unwrapErr);
+            }
+          }
+
+          if (!resolvedKeyStr) {
             setNeedsManualKey(true);
             setIsLoading(false);
             setDownloadProgress(null);
@@ -191,16 +213,22 @@ export const PickupView: React.FC<PickupViewProps> = ({
           }
 
           try {
-            const cryptoKey = await importKeyFromString(activeKeyStr);
+            const cryptoKey = await importKeyFromString(resolvedKeyStr);
             const decryptedRaw = await decryptData(payload.encryptedBundle, cryptoKey);
 
             if (payload.type === 'text') {
               setDecryptedText(decryptedRaw);
             } else if (payload.type === 'file') {
               const fileObj = JSON.parse(decryptedRaw);
+              const computedSize = (fileObj.size && fileObj.size > 0)
+                ? fileObj.size
+                : (payload.file?.size && payload.file.size > 0)
+                ? payload.file.size
+                : getByteLengthFromDataUrl(fileObj.dataUrl || '');
+
               setDecryptedFile({
                 name: sanitizeFilename(fileObj.name || payload.file?.name || 'decrypted-file'),
-                size: fileObj.size || payload.file?.size || 0,
+                size: computedSize,
                 type: fileObj.type || payload.file?.type || 'application/octet-stream',
                 dataUrl: fileObj.dataUrl,
               });
@@ -219,10 +247,14 @@ export const PickupView: React.FC<PickupViewProps> = ({
           if (payload.type === 'text') {
             setDecryptedText(payload.textContent || '');
           } else if (payload.file) {
+            const computedSize = (payload.file.size && payload.file.size > 0)
+              ? payload.file.size
+              : getByteLengthFromDataUrl(payload.file.dataUrl || '');
+
             setDecryptedFile({
               name: sanitizeFilename(payload.file.name),
-              size: payload.file.size,
-              type: payload.file.type,
+              size: computedSize,
+              type: payload.file.type || 'application/octet-stream',
               dataUrl: payload.file.dataUrl,
             });
           }
@@ -243,12 +275,41 @@ export const PickupView: React.FC<PickupViewProps> = ({
     }
   };
 
-  const handleApplyManualKey = () => {
+  const handleApplyManualKey = async () => {
     if (!manualKeyInput.trim()) return;
     const key = manualKeyInput.trim();
     setE2eKeyString(key);
-    setNeedsManualKey(false);
-    if (retrievedPayload && digits.every((d) => d !== '')) {
+
+    if (retrievedPayload?.encryptedBundle?.isEncrypted) {
+      setIsLoading(true);
+      try {
+        const cryptoKey = await importKeyFromString(key);
+        const decryptedRaw = await decryptData(retrievedPayload.encryptedBundle, cryptoKey);
+
+        if (retrievedPayload.type === 'text') {
+          setDecryptedText(decryptedRaw);
+        } else if (retrievedPayload.type === 'file') {
+          const fileObj = JSON.parse(decryptedRaw);
+          setDecryptedFile({
+            name: sanitizeFilename(fileObj.name || retrievedPayload.file?.name || 'decrypted-file'),
+            size: fileObj.size || retrievedPayload.file?.size || 0,
+            type: fileObj.type || retrievedPayload.file?.type || 'application/octet-stream',
+            dataUrl: fileObj.dataUrl,
+          });
+        }
+        setNeedsManualKey(false);
+        setApiError(null);
+      } catch (err) {
+        console.error('Decryption failed with manual key', err);
+        setApiError({
+          code: 'DECRYPTION_FAILED',
+          message: 'Invalid key. Unable to decrypt payload.',
+          retryable: true,
+        });
+      } finally {
+        setIsLoading(false);
+      }
+    } else if (digits.every((d) => d !== '')) {
       handleExplicitPickup(digits.join(''), key);
     }
   };
@@ -270,21 +331,60 @@ export const PickupView: React.FC<PickupViewProps> = ({
     }
   };
 
-  const handleDownloadFile = () => {
+  const handleDownloadFile = async () => {
     const targetFile = decryptedFile || retrievedPayload?.file;
-    if (!targetFile?.dataUrl) return;
+    if (!targetFile?.dataUrl) {
+      setApiError({
+        code: 'FILE_DATA_MISSING',
+        message: 'File binary data is unavailable in the retrieved payload.',
+        retryable: false,
+      });
+      return;
+    }
 
     const safeName = sanitizeFilename(targetFile.name || 'burner-download');
-    const a = document.createElement('a');
-    a.href = targetFile.dataUrl;
-    a.download = safeName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    const success = await downloadDataUrlAsBlob(
+      targetFile.dataUrl,
+      safeName,
+      targetFile.type || 'application/octet-stream'
+    );
+
+    if (success) {
+      setIsDownloaded(true);
+      setTimeout(() => setIsDownloaded(false), 2500);
+    }
+  };
+
+  const handleDirectStreamDownload = () => {
+    const targetFile = decryptedFile || retrievedPayload?.file;
+    if (!targetFile?.dataUrl) {
+      setApiError({
+        code: 'FILE_DATA_MISSING',
+        message: 'File binary data is unavailable in the retrieved payload.',
+        retryable: false,
+      });
+      return;
+    }
+
+    const safeName = sanitizeFilename(targetFile.name || 'burner-download');
+    triggerServerStreamDownload(
+      targetFile.dataUrl,
+      safeName,
+      targetFile.type || 'application/octet-stream'
+    );
+    setIsDownloaded(true);
+    setTimeout(() => setIsDownloaded(false), 2500);
+  };
+
+  const handleOpenInNewTab = async () => {
+    const targetFile = decryptedFile || retrievedPayload?.file;
+    if (!targetFile?.dataUrl) return;
+    const safeName = sanitizeFilename(targetFile.name || 'burner-preview');
+    await openDataUrlInNewTab(targetFile.dataUrl, safeName);
   };
 
   const formatFileSize = (bytes?: number) => {
-    if (!bytes) return '0 B';
+    if (!bytes || bytes <= 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -632,19 +732,68 @@ export const PickupView: React.FC<PickupViewProps> = ({
                   <h3 className="text-lg font-mono text-white max-w-sm truncate font-medium">
                     {decryptedFile?.name || retrievedPayload.file?.name}
                   </h3>
-                  <p className="text-xs text-white/40 uppercase tracking-widest font-mono">
-                    {formatFileSize(decryptedFile?.size || retrievedPayload.file?.size)} • {decryptedFile?.type || retrievedPayload.file?.type}
-                  </p>
+                  <div className="flex items-center justify-center flex-wrap gap-2 text-xs text-white/50 font-mono">
+                    <span className="uppercase tracking-wider">
+                      {formatFileSize(decryptedFile?.size || retrievedPayload.file?.size)}
+                    </span>
+                    <span>•</span>
+                    <span className="uppercase tracking-wider">
+                      {decryptedFile?.type || retrievedPayload.file?.type || 'Binary'}
+                    </span>
+                    {(decryptedFile?.size || retrievedPayload.file?.size) ? (
+                      <>
+                        <span>•</span>
+                        <span className="text-emerald-400 font-mono">
+                          {(decryptedFile?.size || retrievedPayload.file?.size || 0).toLocaleString()} bytes verified
+                        </span>
+                      </>
+                    ) : null}
+                  </div>
                 </div>
 
-                <button
-                  id="download-retrieved-file"
-                  onClick={handleDownloadFile}
-                  className="flex items-center space-x-2 px-8 py-3 rounded-xl bg-white text-black text-xs uppercase tracking-[0.25em] font-semibold hover:bg-[#FF3B30] hover:text-white transition-all shadow-xl cursor-pointer"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Download File</span>
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-3 w-full max-w-md">
+                  <button
+                    id="download-retrieved-file"
+                    onClick={handleDownloadFile}
+                    className={`flex-1 flex items-center justify-center space-x-2 px-6 py-3 rounded-xl text-xs uppercase tracking-[0.2em] font-semibold transition-all shadow-xl cursor-pointer ${
+                      isDownloaded
+                        ? 'bg-emerald-500 text-white shadow-emerald-500/20'
+                        : 'bg-white text-black hover:bg-[#FF3B30] hover:text-white'
+                    }`}
+                  >
+                    {isDownloaded ? (
+                      <>
+                        <Check className="w-4 h-4 text-white animate-bounce" />
+                        <span>Saved</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-4 h-4" />
+                        <span>Download File</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    id="download-stream-btn"
+                    onClick={handleDirectStreamDownload}
+                    title="Direct binary stream from server — guaranteed non-0-byte download bypassing browser sandbox"
+                    className="flex items-center justify-center space-x-2 px-4 py-3 rounded-xl text-xs uppercase tracking-wider font-medium text-white/80 bg-white/5 hover:bg-white/10 hover:text-white border border-white/10 transition-all cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5 text-[#FF3B30]" />
+                    <span>Direct Stream</span>
+                  </button>
+
+                  <button
+                    id="open-tab-btn"
+                    onClick={handleOpenInNewTab}
+                    title="Open file in a new browser tab to view or save directly"
+                    className="flex items-center justify-center space-x-1.5 px-3.5 py-3 rounded-xl text-xs uppercase tracking-wider font-medium text-white/60 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all cursor-pointer"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Preview</span>
+                  </button>
+                </div>
               </div>
             )}
 
