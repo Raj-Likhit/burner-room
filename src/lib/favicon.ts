@@ -2,7 +2,7 @@
  * Dynamic document title and favicon badge manager
  */
 
-let originalTitle = 'Burner Room — Zero-Trace Ephemeral Sharing';
+let originalTitle = 'Burner Room — Private & Temporary File Sharing';
 
 /**
  * Set document title with dynamic prefix
@@ -20,13 +20,13 @@ export function updateTabTitle(
   }
 
   if (state === 'burned') {
-    document.title = `🔥 Burned — Burner Room`;
+    document.title = `Deleted — Burner Room`;
     setFavicon('burned');
     return;
   }
 
   if (state === 'expired') {
-    document.title = `⏰ Expired — Burner Room`;
+    document.title = `Expired — Burner Room`;
     setFavicon('burned');
     return;
   }
@@ -36,9 +36,9 @@ export function updateTabTitle(
       const mins = Math.floor(remainingSeconds / 60);
       const secs = remainingSeconds % 60;
       const timeStr = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-      document.title = `[${timeStr}] PIN ${pin} — Burner Room`;
+      document.title = `[${timeStr}] Code ${pin} — Burner Room`;
     } else {
-      document.title = `[Armed] PIN ${pin} — Burner Room`;
+      document.title = `Code ${pin} — Burner Room`;
     }
     setFavicon('armed');
     return;

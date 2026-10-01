@@ -242,17 +242,17 @@ export default function App() {
         if (data.type === 'pickup') {
           setLiveReadCount(data.readCount || 1);
           if (data.isBurned) {
-            setLastEventMessage('🔥 Recipient retrieved payload! Session permanently burned.');
-            setBurnedNotice('Payload retrieved & incinerated from RAM by recipient.');
+            setLastEventMessage('Recipient downloaded your transfer. It has been deleted.');
+            setBurnedNotice('Transfer downloaded and deleted.');
             sessionStorage.removeItem(SESSION_STORAGE_KEY);
             setTimeout(() => {
               fetchNewSession();
             }, 3000);
           } else {
-            setLastEventMessage(`Recipient access #${data.readCount} verified.`);
+            setLastEventMessage(`Recipient downloaded transfer (${data.readCount} times).`);
           }
         } else if (data.type === 'burned' || data.type === 'expired') {
-          setBurnedNotice('Payload cleared from memory.');
+          setBurnedNotice('Transfer expired and deleted.');
           sessionStorage.removeItem(SESSION_STORAGE_KEY);
           setTimeout(() => {
             fetchNewSession();
@@ -366,7 +366,7 @@ export default function App() {
     try {
       const data = await BurnerApi.burnPayload(pin, senderToken);
       if (data.success) {
-        setBurnedNotice('Payload incinerated immediately by sender token.');
+        setBurnedNotice('Transfer deleted by sender.');
         sessionStorage.removeItem(SESSION_STORAGE_KEY);
         setTimeout(() => {
           fetchNewSession();
@@ -383,7 +383,7 @@ export default function App() {
   // When timer expires
   const handleTimerExpire = () => {
     if (isUploaded) {
-      setBurnedNotice('TTL Expired: Payload incinerated automatically.');
+      setBurnedNotice('Transfer expired and deleted.');
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
       setTimeout(() => {
         fetchNewSession();
@@ -405,7 +405,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col items-center justify-center px-4 sm:px-12 py-8 sm:py-16">
-        <div className="w-full max-w-3xl flex flex-col items-center space-y-10 sm:space-y-14">
+        <div className="w-full max-w-3xl flex flex-col items-center space-y-8 sm:space-y-12">
           <AnimatePresence mode="wait">
             {mode === 'drop' ? (
               <motion.div
@@ -414,32 +414,31 @@ export default function App() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -16 }}
                 transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-                className="w-full flex flex-col items-center space-y-8 sm:space-y-12"
+                className="w-full flex flex-col items-center space-y-6 sm:space-y-10"
               >
-                {/* Centerpiece 4-Digit Session PIN */}
+                {/* Centerpiece 4-Digit Transfer Code */}
                 <PinDisplay
                   pin={pin}
                   e2eKeyString={e2eKeyString}
                   onRefreshPin={() => fetchNewSession()}
                   isLocked={isUploaded}
-                  subtitle={isUploaded ? 'Active Uplink Key' : 'Session Access Key'}
+                  subtitle={isUploaded ? 'Active Transfer Code' : 'Transfer Code'}
                 />
 
-                {/* Burn Notice Banner if active */}
+                {/* Status Notice Banner if active */}
                 {burnedNotice && (
                   <motion.div
-                    initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                    initial={{ opacity: 0, scale: 0.98, y: -4 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    transition={{ duration: 0.25 }}
-                    className="p-3 px-6 rounded-2xl bg-[#FF3B30]/10 border border-[#FF3B30]/30 text-[#FF3B30] text-xs flex items-center space-x-2 font-mono shadow-[0_0_15px_rgba(255,59,48,0.2)]"
+                    exit={{ opacity: 0, scale: 0.98 }}
+                    transition={{ duration: 0.2 }}
+                    className="p-3 px-5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 text-xs flex items-center space-x-2 shadow-md"
                   >
-                    <Flame className="w-4 h-4 animate-pulse" />
                     <span>{burnedNotice}</span>
                   </motion.div>
                 )}
 
-                {/* Dropzone / Upload State */}
+                {/* Send / Upload State */}
                 <DropZone
                   pin={pin}
                   senderToken={senderToken}
@@ -467,12 +466,12 @@ export default function App() {
                   }}
                 />
 
-                {/* Self-Destruct Sequence Timer */}
+                {/* Expiry Timer */}
                 <CountdownTimer
                   expiresAt={expiresAt}
                   totalDurationSeconds={ttlSeconds}
                   onExpire={handleTimerExpire}
-                  label={isUploaded ? 'Auto-Purge Countdown' : 'Session TTL Sequence'}
+                  label={isUploaded ? 'Expires in' : 'Transfer Lifetime'}
                 />
               </motion.div>
             ) : (

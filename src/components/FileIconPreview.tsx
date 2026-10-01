@@ -6,9 +6,10 @@ import {
   FileAudio,
   FileVideo,
   FileImage,
-  FileCheck,
+  FileSpreadsheet,
   File,
 } from 'lucide-react';
+import { getFileTypeInfo } from '../lib/crypto';
 
 interface FileIconPreviewProps {
   fileName?: string;
@@ -25,40 +26,25 @@ export const FileIconPreview: React.FC<FileIconPreviewProps> = ({
   size = 'md',
   className = '',
 }) => {
-  const extension = fileName.split('.').pop()?.toLowerCase() || '';
-  const isImage =
-    fileType.startsWith('image/') ||
-    ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(extension);
-  const isVideo =
-    fileType.startsWith('video/') ||
-    ['mp4', 'mov', 'webm', 'avi', 'mkv'].includes(extension);
-  const isAudio =
-    fileType.startsWith('audio/') ||
-    ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'].includes(extension);
-  const isCode =
-    ['ts', 'tsx', 'js', 'jsx', 'json', 'py', 'html', 'css', 'go', 'rs', 'c', 'cpp', 'sh', 'sql', 'yaml', 'yml'].includes(extension);
-  const isArchive =
-    ['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz'].includes(extension);
-  const isPdf =
-    fileType === 'application/pdf' || extension === 'pdf';
+  const info = getFileTypeInfo(fileName, fileType);
 
   const sizeClasses = {
     sm: 'w-4 h-4',
-    md: 'w-6 h-6',
-    lg: 'w-10 h-10',
+    md: 'w-5 h-5',
+    lg: 'w-8 h-8',
   };
 
   const containerSizes = {
-    sm: 'w-7 h-7 rounded-lg',
-    md: 'w-12 h-12 rounded-2xl',
-    lg: 'w-20 h-20 rounded-3xl',
+    sm: 'w-8 h-8 rounded-lg',
+    md: 'w-12 h-12 rounded-xl',
+    lg: 'w-16 h-16 rounded-2xl',
   };
 
-  // If decrypted image dataUrl exists and is valid, show rich thumbnail!
-  if (isImage && dataUrl && dataUrl.startsWith('data:image/')) {
+  // If decrypted image dataUrl exists and is valid, show rich thumbnail
+  if (info.category === 'image' && dataUrl && dataUrl.startsWith('data:image/')) {
     return (
       <div
-        className={`${containerSizes[size]} overflow-hidden border border-white/20 bg-black/40 flex items-center justify-center relative flex-shrink-0 ${className}`}
+        className={`${containerSizes[size]} overflow-hidden border border-white/10 bg-black/40 flex items-center justify-center relative flex-shrink-0 ${className}`}
       >
         <img
           src={dataUrl}
@@ -70,33 +56,46 @@ export const FileIconPreview: React.FC<FileIconPreviewProps> = ({
     );
   }
 
-  // Render distinctive icons
-  let IconComponent = FileCheck;
-  let iconColor = 'text-[#FF3B30]';
+  // Render distinctive icons based on resolved category
+  let IconComponent = File;
+  let iconColor = 'text-white/70';
+  let bgColor = 'bg-white/[0.04] border-white/10';
 
-  if (isPdf) {
-    IconComponent = FileText;
-    iconColor = 'text-rose-500';
-  } else if (isCode) {
+  if (info.category === 'document') {
+    if (fileName.endsWith('.xls') || fileName.endsWith('.xlsx') || fileName.endsWith('.csv')) {
+      IconComponent = FileSpreadsheet;
+      iconColor = 'text-emerald-400';
+      bgColor = 'bg-emerald-500/10 border-emerald-500/20';
+    } else {
+      IconComponent = FileText;
+      iconColor = 'text-red-400';
+      bgColor = 'bg-red-500/10 border-red-500/20';
+    }
+  } else if (info.category === 'code') {
     IconComponent = FileCode;
     iconColor = 'text-blue-400';
-  } else if (isArchive) {
+    bgColor = 'bg-blue-500/10 border-blue-500/20';
+  } else if (info.category === 'archive') {
     IconComponent = FileArchive;
     iconColor = 'text-amber-400';
-  } else if (isAudio) {
+    bgColor = 'bg-amber-500/10 border-amber-500/20';
+  } else if (info.category === 'audio') {
     IconComponent = FileAudio;
     iconColor = 'text-purple-400';
-  } else if (isVideo) {
+    bgColor = 'bg-purple-500/10 border-purple-500/20';
+  } else if (info.category === 'video') {
     IconComponent = FileVideo;
     iconColor = 'text-indigo-400';
-  } else if (isImage) {
+    bgColor = 'bg-indigo-500/10 border-indigo-500/20';
+  } else if (info.category === 'image') {
     IconComponent = FileImage;
-    iconColor = 'text-emerald-400';
+    iconColor = 'text-teal-400';
+    bgColor = 'bg-teal-500/10 border-teal-500/20';
   }
 
   return (
     <div
-      className={`${containerSizes[size]} bg-white/[0.04] border border-white/10 flex items-center justify-center flex-shrink-0 ${className}`}
+      className={`${containerSizes[size]} ${bgColor} border flex items-center justify-center flex-shrink-0 shadow-sm ${className}`}
     >
       <IconComponent className={`${sizeClasses[size]} ${iconColor}`} />
     </div>

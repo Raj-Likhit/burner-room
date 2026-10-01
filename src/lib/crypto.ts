@@ -226,6 +226,126 @@ export function sanitizeFilename(filename: string): string {
   return sanitized.length > 0 ? sanitized : 'sanitized-file';
 }
 
+export interface FileTypeInfo {
+  mimeType: string;
+  label: string;
+  category: 'image' | 'video' | 'audio' | 'document' | 'archive' | 'code' | 'file';
+}
+
+const EXTENSION_MAP: Record<string, { mime: string; label: string; category: FileTypeInfo['category'] }> = {
+  // Documents
+  pdf: { mime: 'application/pdf', label: 'PDF Document', category: 'document' },
+  doc: { mime: 'application/msword', label: 'Word Document', category: 'document' },
+  docx: { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', label: 'Word Document', category: 'document' },
+  xls: { mime: 'application/vnd.ms-excel', label: 'Excel Spreadsheet', category: 'document' },
+  xlsx: { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', label: 'Excel Spreadsheet', category: 'document' },
+  ppt: { mime: 'application/vnd.ms-powerpoint', label: 'PowerPoint Presentation', category: 'document' },
+  pptx: { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', label: 'PowerPoint Presentation', category: 'document' },
+  txt: { mime: 'text/plain', label: 'Text Document', category: 'document' },
+  rtf: { mime: 'application/rtf', label: 'Rich Text Document', category: 'document' },
+  csv: { mime: 'text/csv', label: 'CSV Spreadsheet', category: 'document' },
+  md: { mime: 'text/markdown', label: 'Markdown File', category: 'document' },
+
+  // Images
+  jpg: { mime: 'image/jpeg', label: 'JPEG Image', category: 'image' },
+  jpeg: { mime: 'image/jpeg', label: 'JPEG Image', category: 'image' },
+  png: { mime: 'image/png', label: 'PNG Image', category: 'image' },
+  gif: { mime: 'image/gif', label: 'GIF Image', category: 'image' },
+  webp: { mime: 'image/webp', label: 'WebP Image', category: 'image' },
+  svg: { mime: 'image/svg+xml', label: 'SVG Vector', category: 'image' },
+  bmp: { mime: 'image/bmp', label: 'BMP Image', category: 'image' },
+  ico: { mime: 'image/x-icon', label: 'Icon', category: 'image' },
+  heic: { mime: 'image/heic', label: 'HEIC Photo', category: 'image' },
+
+  // Archives
+  zip: { mime: 'application/zip', label: 'ZIP Archive', category: 'archive' },
+  rar: { mime: 'application/x-rar-compressed', label: 'RAR Archive', category: 'archive' },
+  '7z': { mime: 'application/x-7z-compressed', label: '7-Zip Archive', category: 'archive' },
+  tar: { mime: 'application/x-tar', label: 'TAR Archive', category: 'archive' },
+  gz: { mime: 'application/gzip', label: 'GZ Archive', category: 'archive' },
+  bz2: { mime: 'application/x-bzip2', label: 'BZip2 Archive', category: 'archive' },
+
+  // Media
+  mp4: { mime: 'video/mp4', label: 'MP4 Video', category: 'video' },
+  mov: { mime: 'video/quicktime', label: 'QuickTime Video', category: 'video' },
+  webm: { mime: 'video/webm', label: 'WebM Video', category: 'video' },
+  mkv: { mime: 'video/x-matroska', label: 'MKV Video', category: 'video' },
+  mp3: { mime: 'audio/mpeg', label: 'MP3 Audio', category: 'audio' },
+  wav: { mime: 'audio/wav', label: 'WAV Audio', category: 'audio' },
+  ogg: { mime: 'audio/ogg', label: 'OGG Audio', category: 'audio' },
+  flac: { mime: 'audio/flac', label: 'FLAC Audio', category: 'audio' },
+  m4a: { mime: 'audio/m4a', label: 'M4A Audio', category: 'audio' },
+
+  // Code
+  js: { mime: 'application/javascript', label: 'JavaScript', category: 'code' },
+  ts: { mime: 'application/typescript', label: 'TypeScript', category: 'code' },
+  jsx: { mime: 'text/javascript', label: 'React JSX', category: 'code' },
+  tsx: { mime: 'text/typescript-jsx', label: 'React TSX', category: 'code' },
+  json: { mime: 'application/json', label: 'JSON Data', category: 'code' },
+  html: { mime: 'text/html', label: 'HTML File', category: 'code' },
+  css: { mime: 'text/css', label: 'CSS Stylesheet', category: 'code' },
+  py: { mime: 'text/x-python', label: 'Python Script', category: 'code' },
+  sh: { mime: 'application/x-sh', label: 'Shell Script', category: 'code' },
+  sql: { mime: 'application/sql', label: 'SQL File', category: 'code' },
+  yml: { mime: 'text/yaml', label: 'YAML Config', category: 'code' },
+  yaml: { mime: 'text/yaml', label: 'YAML Config', category: 'code' },
+};
+
+/**
+ * Accurately resolve MIME type, friendly human label, and category for any file
+ */
+export function getFileTypeInfo(filename: string = '', browserMime?: string): FileTypeInfo {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const fromExt = EXTENSION_MAP[ext];
+
+  if (fromExt) {
+    return {
+      mimeType: fromExt.mime,
+      label: fromExt.label,
+      category: fromExt.category,
+    };
+  }
+
+  // Fallback to browser MIME if clean and descriptive
+  if (browserMime && browserMime !== 'application/octet-stream' && browserMime.includes('/')) {
+    const parts = browserMime.split('/');
+    const cat = parts[0] as FileTypeInfo['category'];
+    const subtype = parts[1].replace('vnd.', '').replace('x-', '').toUpperCase();
+    const validCat = ['image', 'video', 'audio', 'document', 'archive', 'code'].includes(cat) ? cat : 'file';
+    return {
+      mimeType: browserMime,
+      label: `${subtype} File`,
+      category: validCat as FileTypeInfo['category'],
+    };
+  }
+
+  if (ext) {
+    return {
+      mimeType: 'application/octet-stream',
+      label: `${ext.toUpperCase()} File`,
+      category: 'file',
+    };
+  }
+
+  return {
+    mimeType: 'application/octet-stream',
+    label: 'File',
+    category: 'file',
+  };
+}
+
+/**
+ * Format bytes into human-friendly string (e.g. "124 KB", "3.4 MB")
+ */
+export function formatFriendlyFileSize(bytes?: number): string {
+  if (typeof bytes !== 'number' || isNaN(bytes) || bytes <= 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  if (i === 0) return `${bytes} B`;
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+}
+
 /**
  * Calculate accurate byte length from a data URL or base64 string
  */

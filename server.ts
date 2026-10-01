@@ -565,12 +565,14 @@ async function startServer() {
       );
     }
 
-    // Sanitize filename if present
+    // Sanitize filename & ensure file metadata is structured cleanly
     let sanitizedFile = file;
     if (file && file.name) {
       sanitizedFile = {
-        ...file,
         name: sanitizeFilename(file.name),
+        size: typeof file.size === "number" && file.size > 0 ? file.size : 0,
+        type: file.type || "application/octet-stream",
+        dataUrl: file.dataUrl,
       };
     }
 
@@ -617,11 +619,11 @@ async function startServer() {
     currentTotalRamBytes += estimatedBytes;
     ipActiveRamBytes.set(ip, (ipActiveRamBytes.get(ip) || 0) + estimatedBytes);
 
-    console.log(`[Burner Room] Payload armed: PIN ${maskPin(pin)} (${type}, mode: ${payload.shareMode}, ttl: ${ttlSeconds}s)`);
+    console.log(`[Burner Room] File ready: Code ${maskPin(pin)} (${type}, mode: ${payload.shareMode}, ttl: ${ttlSeconds}s)`);
 
     return res.json({
       success: true,
-      message: "Payload armed successfully. Ready for pickup.",
+      message: "Ready to share.",
       pin,
       senderToken,
       shareMode: payload.shareMode,

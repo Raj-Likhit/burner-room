@@ -386,6 +386,16 @@ app.post(["/api/drop", "/drop"], (req: Request, res: Response) => {
   const parsedMaxReads = Number(maxReads);
   const validMaxReads = !isNaN(parsedMaxReads) && parsedMaxReads > 0 ? Math.floor(parsedMaxReads) : undefined;
 
+  let storedFile = sanitizedFile;
+  if (type === "file" && sanitizedFile) {
+    storedFile = {
+      name: sanitizeFilename(sanitizedFile.name || "file"),
+      size: typeof sanitizedFile.size === "number" && sanitizedFile.size > 0 ? sanitizedFile.size : 0,
+      type: sanitizedFile.type || "application/octet-stream",
+      dataUrl: encryptedBundle?.isEncrypted ? undefined : sanitizedFile.dataUrl,
+    };
+  }
+
   const payload: StoredPayload = {
     pin,
     senderToken,
@@ -396,7 +406,7 @@ app.post(["/api/drop", "/drop"], (req: Request, res: Response) => {
     maxReads: validMaxReads,
     sizeBytes: estimatedBytes,
     textContent: type === "text" && !encryptedBundle ? textContent : undefined,
-    file: type === "file" && !encryptedBundle ? sanitizedFile : undefined,
+    file: type === "file" ? storedFile : undefined,
     encryptedBundle: encryptedBundle?.isEncrypted ? encryptedBundle : undefined,
     createdAt: now,
     expiresAt,
