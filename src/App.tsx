@@ -38,6 +38,7 @@ export default function App() {
   const [lastEventMessage, setLastEventMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [burnedNotice, setBurnedNotice] = useState<string | null>(null);
+  const [isFileDeleted, setIsFileDeleted] = useState<boolean>(false);
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
   const [isOffline, setIsOffline] = useState<boolean>(!navigator.onLine);
 
@@ -116,6 +117,7 @@ export default function App() {
         setTtlSeconds(data.ttlSeconds);
       }
       setIsUploaded(false);
+      setIsFileDeleted(false);
       setUploadedType(null);
       setUploadedFileName(undefined);
       setUploadedFileSize(undefined);
@@ -242,21 +244,23 @@ export default function App() {
         if (data.type === 'pickup') {
           setLiveReadCount(data.readCount || 1);
           if (data.isBurned) {
-            setLastEventMessage('Recipient downloaded your transfer. It has been deleted.');
-            setBurnedNotice('Transfer downloaded and deleted.');
+            setIsFileDeleted(true);
+            setLastEventMessage('File has been deleted.');
+            setBurnedNotice('File has been deleted.');
             sessionStorage.removeItem(SESSION_STORAGE_KEY);
-            setTimeout(() => {
-              fetchNewSession();
-            }, 3000);
           } else {
             setLastEventMessage(`Recipient downloaded transfer (${data.readCount} times).`);
           }
-        } else if (data.type === 'burned' || data.type === 'expired') {
-          setBurnedNotice('Transfer expired and deleted.');
+        } else if (data.type === 'burned' || data.isBurned || data.message === 'File has been deleted.') {
+          setIsFileDeleted(true);
+          setLastEventMessage('File has been deleted.');
+          setBurnedNotice('File has been deleted.');
           sessionStorage.removeItem(SESSION_STORAGE_KEY);
-          setTimeout(() => {
-            fetchNewSession();
-          }, 2000);
+        } else if (data.type === 'expired') {
+          setIsFileDeleted(true);
+          setBurnedNotice('File has been deleted.');
+          setLastEventMessage('File has been deleted.');
+          sessionStorage.removeItem(SESSION_STORAGE_KEY);
         }
       } catch (err) {
         console.error('SSE parse error', err);
@@ -366,11 +370,10 @@ export default function App() {
     try {
       const data = await BurnerApi.burnPayload(pin, senderToken);
       if (data.success) {
-        setBurnedNotice('Transfer deleted by sender.');
+        setIsFileDeleted(true);
+        setBurnedNotice('File has been deleted.');
+        setLastEventMessage('File has been deleted.');
         sessionStorage.removeItem(SESSION_STORAGE_KEY);
-        setTimeout(() => {
-          fetchNewSession();
-        }, 1500);
       }
     } catch (e: any) {
       const normalized = normalizeApiError(e);
@@ -383,11 +386,10 @@ export default function App() {
   // When timer expires
   const handleTimerExpire = () => {
     if (isUploaded) {
-      setBurnedNotice('Transfer expired and deleted.');
+      setIsFileDeleted(true);
+      setBurnedNotice('File has been deleted.');
+      setLastEventMessage('File has been deleted.');
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      setTimeout(() => {
-        fetchNewSession();
-      }, 2000);
     }
   };
 
@@ -422,11 +424,11 @@ export default function App() {
                   e2eKeyString={e2eKeyString}
                   onRefreshPin={() => fetchNewSession()}
                   isLocked={isUploaded}
-                  subtitle={isUploaded ? 'Active Transfer Code' : 'Transfer Code'}
+                  subtitle={isFileDeleted ? 'Transfer Completed' : (isUploaded ? 'Active Transfer Code' : 'Transfer Code')}
                 />
 
-                {/* Status Notice Banner if active */}
-                {burnedNotice && (
+                {/* Status Notice Banner if active and not already in deleted card */}
+                {burnedNotice && !isFileDeleted && (
                   <motion.div
                     initial={{ opacity: 0, scale: 0.98, y: -4 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -443,6 +445,7 @@ export default function App() {
                   pin={pin}
                   senderToken={senderToken}
                   isUploaded={isUploaded}
+                  isFileDeleted={isFileDeleted}
                   uploadedType={uploadedType}
                   uploadedFileName={uploadedFileName}
                   uploadedFileSize={uploadedFileSize}
@@ -461,18 +464,17 @@ export default function App() {
                   onManualBurn={handleManualBurn}
                   onReset={() => fetchNewSession()}
                   isLoading={isLoading}
-                  onRequestCustomPin={async (customPin) => {
-                    await fetchNewSession(ttlSeconds, customPin);
-                  }}
                 />
 
-                {/* Expiry Timer */}
-                <CountdownTimer
-                  expiresAt={expiresAt}
-                  totalDurationSeconds={ttlSeconds}
-                  onExpire={handleTimerExpire}
-                  label={isUploaded ? 'Expires in' : 'Transfer Lifetime'}
-                />
+                {/* Expiry Timer - Active once uploaded and not deleted */}
+                {isUploaded && !isFileDeleted && (
+                  <CountdownTimer
+                    expiresAt={expiresAt}
+                    totalDurationSeconds={ttlSeconds}
+                    onExpire={handleTimerExpire}
+                    label="Expires in"
+                  />
+                )}
               </motion.div>
             ) : (
               <motion.div

@@ -4,11 +4,11 @@ import {
   KeyRound,
   Clock,
   X,
-  Sparkles,
   ChevronRight,
   ChevronLeft,
   Lock,
   Upload,
+  Download,
   Trash2,
 } from 'lucide-react';
 
@@ -44,7 +44,7 @@ const STEPS: StepConfig[] = [
     badge: 'Step 2 • Add File or Text',
     title: 'Drop Files or Write Notes',
     description:
-      'Drag and drop any file up to 50MB, or switch to "Send Note" to paste text, passwords, or credentials.',
+      'Drag and drop any file up to 50MB, or switch to "Note" to paste text, passwords, or credentials.',
     icon: Upload,
     positionPreference: 'bottom',
   },
@@ -64,19 +64,19 @@ const STEPS: StepConfig[] = [
     badge: 'Step 4 • Download Limit',
     title: 'Single or Multiple Downloads',
     description:
-      'Choose "Single download" so the file is deleted the moment the recipient downloads it, or allow multiple downloads.',
+      'Choose "One download" to delete the file immediately upon retrieval, or allow 2, 5, 10, or unlimited downloads. The dropdown opens upwards so options are clearly visible.',
     icon: Lock,
     positionPreference: 'bottom',
   },
   {
-    id: 'timer',
-    targetId: 'countdown-timer-container',
-    badge: 'Step 5 • Auto-Delete',
-    title: 'Deleted Automatically',
+    id: 'receive',
+    targetId: 'nav-tab-pickup',
+    badge: 'Step 5 • Receive & Auto-Delete',
+    title: 'Receive on Any Device',
     description:
-      'Files exist only temporarily and are completely deleted when downloaded or expired. No permanent copies remain.',
-    icon: Trash2,
-    positionPreference: 'top',
+      'Recipients click Receive or enter the 4-digit code to download. Once the set download limit is completed, the file is automatically and permanently deleted.',
+    icon: Download,
+    positionPreference: 'bottom',
   },
 ];
 
@@ -141,7 +141,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     if (targetElement) {
       targetElement.scrollIntoView({
         behavior: 'smooth',
-        block: isMobile ? 'center' : 'nearest',
+        block: isMobile ? 'center' : (step.positionPreference === 'bottom' ? 'start' : 'center'),
         inline: 'nearest',
       });
       const t1 = setTimeout(updateTargetRect, 50);
@@ -155,7 +155,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     } else {
       updateTargetRect();
     }
-  }, [isOpen, step.targetId, currentStepIndex, isMobile, updateTargetRect]);
+  }, [isOpen, step.targetId, currentStepIndex, isMobile, step.positionPreference, updateTargetRect]);
 
   // Window resize & scroll listener
   useEffect(() => {
@@ -221,22 +221,8 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     touchStartX.current = null;
   };
 
-  const shouldDockTopOnMobile = Boolean(
-    targetRect && targetRect.top + targetRect.height / 2 > windowDimensions.height / 2
-  );
-
   const getCardStyle = (): React.CSSProperties => {
     if (isMobile) {
-      if (shouldDockTopOnMobile) {
-        return {
-          position: 'fixed',
-          top: 'max(14px, env(safe-area-inset-top, 14px))',
-          left: '12px',
-          right: '12px',
-          margin: '0 auto',
-          maxWidth: 'calc(100vw - 24px)',
-        };
-      }
       return {
         position: 'fixed',
         bottom: 'max(16px, env(safe-area-inset-bottom, 16px))',
@@ -259,7 +245,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     }
 
     const popoverWidth = 380;
-    const popoverHeight = 200;
+    const popoverHeight = 180;
     const viewportWidth = windowDimensions.width;
     const viewportHeight = windowDimensions.height;
 
@@ -267,13 +253,23 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
     left = Math.max(16, Math.min(left, viewportWidth - popoverWidth - 16));
 
     let top = 0;
-    if (
-      step.positionPreference === 'top' ||
-      targetRect.bottom + popoverHeight + 20 > viewportHeight
-    ) {
+    // When step.positionPreference is 'bottom' (especially for downloads dropdown which opens upwards),
+    // position the walkthrough card strictly BELOW the target so the upward dropdown space is 100% free!
+    if (step.positionPreference === 'bottom') {
+      if (targetRect.bottom + popoverHeight + 16 <= viewportHeight) {
+        top = targetRect.bottom + 14;
+      } else {
+        // If near bottom of viewport, position below with minimal gap or dock above if no room below
+        top = Math.min(viewportHeight - popoverHeight - 16, Math.max(16, targetRect.bottom + 8));
+      }
+    } else if (step.positionPreference === 'top') {
       top = Math.max(16, targetRect.top - popoverHeight - 14);
     } else {
-      top = Math.min(viewportHeight - popoverHeight - 16, targetRect.bottom + 14);
+      if (targetRect.bottom + popoverHeight + 20 > viewportHeight) {
+        top = Math.max(16, targetRect.top - popoverHeight - 14);
+      } else {
+        top = Math.min(viewportHeight - popoverHeight - 16, targetRect.bottom + 14);
+      }
     }
 
     return {
@@ -352,7 +348,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
             style={cardStyle}
             initial={{
               opacity: 0,
-              y: isMobile ? (shouldDockTopOnMobile ? -10 : 10) : 6,
+              y: isMobile ? 10 : 6,
               scale: 0.98,
             }}
             animate={{
@@ -362,7 +358,7 @@ export const SpotlightOnboarding: React.FC<SpotlightOnboardingProps> = ({
             }}
             exit={{
               opacity: 0,
-              y: isMobile ? (shouldDockTopOnMobile ? -10 : 10) : 6,
+              y: isMobile ? 10 : 6,
               scale: 0.98,
             }}
             transition={{

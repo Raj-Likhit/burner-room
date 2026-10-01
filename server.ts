@@ -254,18 +254,39 @@ function deletePayloadItem(pin: string, reason = "incinerated") {
     burnedPinsStore.set(pin, { burnedAt: Date.now(), reason });
   }
 
-  // Explicit SSE connection close & memory hygiene
+  // Broadcast deletion event to all connected SSE clients (both sender and recipients) before closing
   const clients = sseClients.get(pin);
-  if (clients) {
+  if (clients && clients.size > 0) {
+    const payloadStr = `data: ${JSON.stringify({
+      type: "burned",
+      isBurned: true,
+      reason,
+      message: "File has been deleted.",
+      timestamp: Date.now(),
+    })}\n\n`;
     for (const client of clients) {
       try {
-        client.write(`data: ${JSON.stringify({ type: "closed", reason })}\n\n`);
-        client.end();
+        client.write(payloadStr);
       } catch {
         // ignore
       }
     }
-    sseClients.delete(pin);
+
+    // Grace period before closing connection so clients can process the SSE event
+    setTimeout(() => {
+      const activeClients = sseClients.get(pin);
+      if (activeClients) {
+        for (const client of activeClients) {
+          try {
+            client.write(`data: ${JSON.stringify({ type: "closed", reason, message: "File has been deleted." })}\n\n`);
+            client.end();
+          } catch {
+            // ignore
+          }
+        }
+        sseClients.delete(pin);
+      }
+    }, 600);
   }
 }
 
@@ -669,8 +690,8 @@ async function startServer() {
       return sendApiError(
         res,
         410,
-        "PIN_BURNED_ALREADY",
-        `This payload was incinerated (${burnedInfo.reason}).`,
+        "FILE_DELETED",
+        "File has been deleted.",
         false
       );
     }
@@ -770,8 +791,8 @@ async function startServer() {
       return sendApiError(
         res,
         410,
-        "PIN_BURNED_ALREADY",
-        `Payload is no longer available (${burnedInfo.reason}).`,
+        "FILE_DELETED",
+        "File has been deleted.",
         false
       );
     }
@@ -839,20 +860,25 @@ async function startServer() {
     // Check if 1-time read OR multi-share maxReads threshold reached
     if (item.shareMode === "burn_on_read" || (item.maxReads && item.readCount >= item.maxReads)) {
       isBurned = true;
-      deletePayloadItem(foundKey, "Retrieved by recipient");
-      console.log(`[Burner Room] PIN ${maskPin(pin)} retrieved & BURNED.`);
-    } else {
-      console.log(`[Burner Room] PIN ${maskPin(pin)} retrieved (read #${item.readCount}).`);
     }
 
-    // Broadcast SSE live event to sender
+    // Broadcast SSE live event to both sender and connected recipients BEFORE deletion
     broadcastSseEvent(pin, {
       type: "pickup",
       readCount: item.readCount,
       maxReads: item.maxReads,
       isBurned,
+      reason: isBurned ? "Download limit reached" : undefined,
+      message: isBurned ? "File has been deleted." : `Download completed (${item.readCount} of ${item.maxReads || 'unlimited'}).`,
       timestamp: now,
     });
+
+    if (isBurned) {
+      deletePayloadItem(foundKey, "Download limit reached");
+      console.log(`[Burner Room] PIN ${maskPin(pin)}: Download limit reached. File has been deleted.`);
+    } else {
+      console.log(`[Burner Room] PIN ${maskPin(pin)} retrieved (download #${item.readCount} of ${item.maxReads || 'unlimited'}).`);
+    }
 
     return res.json({
       success: true,
@@ -961,19 +987,15 @@ async function startServer() {
     return res.json({ success: true, message: "Payload destroyed immediately." });
   });
 
-  // 7. Live Pickup Notifications via Server-Sent Events (SSE)
+  // 7. Live Notifications via Server-Sent Events (SSE)
   app.get("/api/events/:pin", (req: Request, res: Response) => {
     const pin = req.params.pin;
-    const token = (req.query.senderToken as string) || (req.headers["x-sender-token"] as string);
 
     const item = payloadStore.get(pin);
-    if (!item) {
-      return res.status(404).json({ error: "Session not found." });
-    }
+    const burnedInfo = burnedPinsStore.get(pin);
 
-    // Authenticate sender
-    if (!token || !timingSafeEqualStr(item.senderToken, token)) {
-      return res.status(403).json({ error: "Unauthorized SSE connection." });
+    if (!item && !burnedInfo) {
+      return res.status(404).json({ error: "Session not found." });
     }
 
     res.writeHead(200, {
@@ -981,6 +1003,11 @@ async function startServer() {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
+
+    if (burnedInfo) {
+      res.write(`data: ${JSON.stringify({ type: "burned", isBurned: true, message: "File has been deleted." })}\n\n`);
+      return res.end();
+    }
 
     res.write(`data: ${JSON.stringify({ type: "connected", pin: maskPin(pin) })}\n\n`);
 

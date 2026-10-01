@@ -7,39 +7,42 @@ import {
   ArrowRight,
   X,
   AlertTriangle,
-  Users,
-  Lock,
-  Clock,
-  SlidersHorizontal,
-  ShieldCheck,
-  Share2,
-  Check,
-  Copy,
-  Hash,
-  KeyRound,
   RotateCcw,
   Zap,
+  Check,
+  ShieldCheck,
+  Clock,
   Trash2,
+  Share2,
+  Copy,
+  ChevronDown,
+  ArrowUp,
   CheckCircle2,
 } from 'lucide-react';
-import { BurnerFileMetadata, EncryptedBundle, PayloadType, ShareMode, ApiErrorDetail } from '../types';
+import {
+  PayloadType,
+  ShareMode,
+  BurnerFileMetadata,
+  EncryptedBundle,
+  ApiErrorDetail,
+} from '../types';
 import {
   generateE2EKey,
   exportKeyToString,
   encryptData,
-  sanitizeFilename,
   wrapKeyWithPin,
+  sanitizeFilename,
   getByteLengthFromDataUrl,
   getFileTypeInfo,
   formatFriendlyFileSize,
 } from '../lib/crypto';
-import { BurnerApi } from '../lib/api';
 import { FileIconPreview } from './FileIconPreview';
 
 interface DropZoneProps {
   pin: string;
   senderToken: string;
   isUploaded: boolean;
+  isFileDeleted?: boolean;
   uploadedType: PayloadType | null;
   uploadedFileName?: string;
   uploadedFileSize?: number;
@@ -68,27 +71,28 @@ interface DropZoneProps {
   onManualBurn: () => Promise<void>;
   onReset: () => void;
   isLoading: boolean;
-  onRequestCustomPin?: (pin: string) => Promise<void>;
 }
 
-const EXPIRY_PRESETS = [
-  { label: '5m', value: 300 },
-  { label: '10m', value: 600 },
-  { label: '15m', value: 900 },
-  { label: '30m', value: 1800 },
-  { label: '1h', value: 3600 },
+const EXPIRY_OPTIONS = [
+  { label: '5 min', value: 300 },
+  { label: '10 min', value: 600 },
+  { label: '15 min', value: 900 },
+  { label: '30 min', value: 1800 },
+  { label: '1 hour', value: 3600 },
 ];
 
-const MAX_DOWNLOAD_PRESETS = [
-  { label: 'Unlimited', value: undefined },
-  { label: '2 times', value: 2 },
-  { label: '5 times', value: 5 },
-  { label: '10 times', value: 10 },
+const DOWNLOAD_OPTIONS = [
+  { label: 'One download', mode: 'burn_on_read' as ShareMode, maxReads: 1 },
+  { label: '2 downloads', mode: 'multiple_reads' as ShareMode, maxReads: 2 },
+  { label: '5 downloads', mode: 'multiple_reads' as ShareMode, maxReads: 5 },
+  { label: '10 downloads', mode: 'multiple_reads' as ShareMode, maxReads: 10 },
+  { label: 'Unlimited downloads', mode: 'multiple_reads' as ShareMode, maxReads: undefined },
 ];
 
 export const DropZone: React.FC<DropZoneProps> = ({
   pin,
   isUploaded,
+  isFileDeleted = false,
   uploadedType,
   uploadedFileName,
   uploadedFileSize,
@@ -101,76 +105,39 @@ export const DropZone: React.FC<DropZoneProps> = ({
   setTtlSeconds,
   e2eKeyString,
   setE2eKeyString,
-  liveReadCount,
   lastEventMessage,
   onDropPayload,
   onManualBurn,
   onReset,
   isLoading,
 }) => {
-  const [activeTab, setActiveTab] = useState<'file' | 'text'>('file');
+  const [activeTab, setActiveTab] = useState<'file' | 'note'>('file');
   const [textContent, setTextContent] = useState('');
   const [selectedFile, setSelectedFile] = useState<{ file: File; dataUrl: string } | null>(null);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [apiError, setApiError] = useState<ApiErrorDetail | null>(null);
-  const [showCustomExpiry, setShowCustomExpiry] = useState(false);
-  const [e2eEnabled, setE2eEnabled] = useState(true);
+  const [isDownloadDropdownOpen, setIsDownloadDropdownOpen] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [sharedSuccess, setSharedSuccess] = useState(false);
 
   // Undo window (5s countdown before final publish)
   const [undoCountdown, setUndoCountdown] = useState<number | null>(null);
   const [pendingDrop, setPendingDrop] = useState<{ type: 'text' | 'file' } | null>(null);
   const undoTimerRef = useRef<any>(null);
 
-  // Custom 4-digit code option
-  const [useCustomPin, setUseCustomPin] = useState(false);
-  const [customPinInput, setCustomPinInput] = useState('');
-  const [customPinAvailability, setCustomPinAvailability] = useState<{
-    checking: boolean;
-    available?: boolean;
-    message?: string;
-  }>({ checking: false });
-  const pinCheckTimeoutRef = useRef<any>(null);
-
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const isWebCryptoAvailable = typeof window !== 'undefined' && !!window.crypto?.subtle;
 
-  // Debounced check for custom code
+  // Close dropdown on outside click
   useEffect(() => {
-    if (!useCustomPin || customPinInput.length !== 4) {
-      setCustomPinAvailability({ checking: false });
-      return;
-    }
-
-    if (pinCheckTimeoutRef.current) {
-      clearTimeout(pinCheckTimeoutRef.current);
-    }
-
-    setCustomPinAvailability({ checking: true });
-    pinCheckTimeoutRef.current = setTimeout(async () => {
-      try {
-        const res = await BurnerApi.checkPinAvailability(customPinInput);
-        setCustomPinAvailability({
-          checking: false,
-          available: res.available,
-          message: res.message,
-        });
-      } catch {
-        setCustomPinAvailability({
-          checking: false,
-          available: false,
-          message: 'Unable to verify code availability.',
-        });
-      }
-    }, 400);
-
-    return () => {
-      if (pinCheckTimeoutRef.current) {
-        clearTimeout(pinCheckTimeoutRef.current);
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDownloadDropdownOpen(false);
       }
     };
-  }, [customPinInput, useCustomPin]);
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -241,30 +208,40 @@ export const DropZone: React.FC<DropZoneProps> = ({
     onDrop: onDrop as any,
     multiple: false,
     maxSize: 50 * 1024 * 1024,
-    noClick: activeTab === 'text' || selectedFile !== null,
+    noClick: activeTab === 'note' || selectedFile !== null,
   } as any);
 
-  // Smooth progress animation
-  const simulateProgress = async () => {
-    setUploadProgress(15);
-    await new Promise((r) => setTimeout(r, 60));
-    setUploadProgress(50);
-    await new Promise((r) => setTimeout(r, 80));
-    setUploadProgress(90);
-    await new Promise((r) => setTimeout(r, 60));
-    setUploadProgress(100);
+  const simulateProgress = (): Promise<void> => {
+    return new Promise((resolve) => {
+      setUploadProgress(20);
+      setTimeout(() => {
+        setUploadProgress(60);
+        setTimeout(() => {
+          setUploadProgress(90);
+          setTimeout(() => {
+            setUploadProgress(100);
+            setTimeout(() => {
+              setUploadProgress(null);
+              resolve();
+            }, 100);
+          }, 150);
+        }, 150);
+      }, 150);
+    });
   };
 
-  // 5-second countdown to cancel
+  // Trigger 5-second reversible countdown
   const triggerSendCountdown = (type: 'text' | 'file') => {
+    setApiError(null);
     if (type === 'text' && !textContent.trim()) {
       setApiError({
-        code: 'EMPTY_TEXT',
-        message: 'Please write or paste some text before sending.',
+        code: 'EMPTY_PAYLOAD',
+        message: 'Please write or paste a note before sending.',
         retryable: false,
       });
       return;
     }
+
     if (type === 'file' && !selectedFile) {
       setApiError({
         code: 'NO_FILE_SELECTED',
@@ -274,7 +251,6 @@ export const DropZone: React.FC<DropZoneProps> = ({
       return;
     }
 
-    setApiError(null);
     setPendingDrop({ type });
     setUndoCountdown(5);
 
@@ -284,7 +260,8 @@ export const DropZone: React.FC<DropZoneProps> = ({
       setUndoCountdown((prev) => {
         if (prev === null || prev <= 1) {
           clearInterval(undoTimerRef.current);
-          executeSend(type);
+          undoTimerRef.current = null;
+          executeDropPayload(type);
           return null;
         }
         return prev - 1;
@@ -293,32 +270,34 @@ export const DropZone: React.FC<DropZoneProps> = ({
   };
 
   const handleCancelUndo = () => {
-    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
-    setUndoCountdown(null);
-    setPendingDrop(null);
-  };
-
-  const handleSendImmediately = () => {
-    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
-    if (pendingDrop) {
-      executeSend(pendingDrop.type);
+    if (undoTimerRef.current) {
+      clearInterval(undoTimerRef.current);
+      undoTimerRef.current = null;
     }
     setUndoCountdown(null);
     setPendingDrop(null);
   };
 
-  // Upload & encrypt transfer
-  const executeSend = async (type: 'text' | 'file') => {
-    setUploadProgress(10);
-    setApiError(null);
+  const handleSendImmediately = () => {
+    if (undoTimerRef.current) {
+      clearInterval(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    setUndoCountdown(null);
+    if (pendingDrop) {
+      executeDropPayload(pendingDrop.type);
+    }
+  };
 
-    const activeCustomPin = useCustomPin && customPinAvailability.available ? customPinInput : undefined;
-    const targetPin = (activeCustomPin || (pin && pin !== '----' && /^[0-9]{4}$/.test(pin) ? pin : undefined)) || Math.floor(1000 + Math.random() * 9000).toString();
+  // Perform payload creation and encryption
+  const executeDropPayload = async (type: 'text' | 'file') => {
+    setApiError(null);
+    const targetPin = (pin && pin !== '----' && /^[0-9]{4}$/.test(pin) ? pin : undefined) || Math.floor(1000 + Math.random() * 9000).toString();
 
     try {
       if (type === 'text') {
         await simulateProgress();
-        if (e2eEnabled && isWebCryptoAvailable) {
+        if (isWebCryptoAvailable) {
           const key = await generateE2EKey();
           const keyStr = await exportKeyToString(key);
           const encryptedBundle = await encryptData(textContent.trim(), key);
@@ -361,7 +340,6 @@ export const DropZone: React.FC<DropZoneProps> = ({
           ? selectedFile.file.size
           : getByteLengthFromDataUrl(selectedFile.dataUrl);
 
-        // Resolve clean MIME type
         const typeInfo = getFileTypeInfo(sanitizedName, selectedFile.file.type);
 
         const fileMeta: BurnerFileMetadata = {
@@ -371,11 +349,17 @@ export const DropZone: React.FC<DropZoneProps> = ({
           dataUrl: selectedFile.dataUrl,
         };
 
-        if (e2eEnabled && isWebCryptoAvailable) {
+        if (isWebCryptoAvailable) {
           const key = await generateE2EKey();
           const keyStr = await exportKeyToString(key);
-          const payloadString = JSON.stringify(fileMeta);
-          const encryptedBundle = await encryptData(payloadString, key);
+          const rawJson = JSON.stringify({
+            name: sanitizedName,
+            size: effectiveSize,
+            type: typeInfo.mimeType,
+            dataUrl: selectedFile.dataUrl,
+          });
+
+          const encryptedBundle = await encryptData(rawJson, key);
           try {
             const pinKeyBundle = await wrapKeyWithPin(keyStr, targetPin);
             encryptedBundle.pinKeyBundle = pinKeyBundle;
@@ -384,17 +368,10 @@ export const DropZone: React.FC<DropZoneProps> = ({
           }
           setE2eKeyString(keyStr);
 
-          // Placeholder metadata for server preview without exposing payload contents
-          const securePlaceholderMeta: BurnerFileMetadata = {
-            name: sanitizedName,
-            size: effectiveSize,
-            type: typeInfo.mimeType,
-          };
-
           await onDropPayload(
             'file',
             undefined,
-            securePlaceholderMeta,
+            fileMeta,
             shareMode,
             ttlSeconds,
             encryptedBundle,
@@ -418,36 +395,35 @@ export const DropZone: React.FC<DropZoneProps> = ({
         }
       }
     } catch (err: any) {
-      setApiError(err);
+      setApiError({
+        code: 'SEND_FAILED',
+        message: err.message || 'Failed to prepare transfer. Please try again.',
+        retryable: true,
+      });
     } finally {
-      setTimeout(() => setUploadProgress(null), 400);
+      setPendingDrop(null);
     }
   };
 
-  const formatDurationText = (secs: number) => {
-    if (secs >= 3600) {
-      const h = Math.floor(secs / 3600);
-      const m = Math.round((secs % 3600) / 60);
-      return m > 0 ? `${h}h ${m}m` : `${h}h`;
-    }
-    return `${Math.round(secs / 60)} min`;
-  };
-
-  const getFullShareUrl = () => {
-    let url = `${window.location.origin}/?pin=${pin}`;
+  const getFullShareUrl = (): string => {
+    if (typeof window === 'undefined') return '';
+    const base = `${window.location.origin}${window.location.pathname}?pin=${pin}`;
     if (e2eKeyString) {
-      url += `#key=${e2eKeyString}`;
+      return `${base}#key=${encodeURIComponent(e2eKeyString)}`;
     }
-    return url;
+    return base;
   };
 
   const handleCopyFullLink = async () => {
+    const url = getFullShareUrl();
     try {
-      await navigator.clipboard.writeText(getFullShareUrl());
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
-    } catch (err) {
-      console.error('Copy failed', err);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 2000);
+      }
+    } catch {
+      // fallback
     }
   };
 
@@ -460,8 +436,6 @@ export const DropZone: React.FC<DropZoneProps> = ({
           text: `Download your file with code ${pin}.`,
           url: url,
         });
-        setSharedSuccess(true);
-        setTimeout(() => setSharedSuccess(false), 2000);
       } catch {
         handleCopyFullLink();
       }
@@ -470,19 +444,82 @@ export const DropZone: React.FC<DropZoneProps> = ({
     }
   };
 
+  // Determine current download label
+  const currentDownloadOption = DOWNLOAD_OPTIONS.find((opt) => {
+    if (opt.mode === 'burn_on_read' && shareMode === 'burn_on_read') return true;
+    if (opt.mode === 'multiple_reads' && shareMode === 'multiple_reads' && opt.maxReads === maxReads) return true;
+    return false;
+  }) || DOWNLOAD_OPTIONS[0];
+
   return (
-    <div className="w-full max-w-2xl">
+    <div className="w-full max-w-2xl flex flex-col space-y-4">
       <AnimatePresence mode="wait">
-        {/* STATE: READY TO SHARE */}
-        {isUploaded ? (
+        {/* STATE 1: FILE HAS BEEN DELETED (Auto-updated when download limit is reached) */}
+        {isFileDeleted ? (
+          <motion.div
+            key="deleted-state"
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            className="w-full relative border border-red-500/30 rounded-3xl p-6 sm:p-10 bg-[#141010] flex flex-col items-center text-center space-y-6 shadow-2xl"
+          >
+            <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold">
+              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              <span>File has been deleted</span>
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 className="text-xl sm:text-2xl font-light text-white tracking-tight">
+                File has been deleted
+              </h3>
+              <p className="text-xs sm:text-sm text-zinc-400 max-w-md mx-auto leading-relaxed">
+                The set limit of downloads has been reached. The file has been automatically and permanently deleted from the server.
+              </p>
+            </div>
+
+            {/* Deleted Transfer Summary */}
+            <div className="w-full max-w-md p-4 rounded-2xl bg-zinc-900/90 border border-zinc-800 flex items-center justify-between text-left opacity-80">
+              <div className="flex items-center space-x-3 overflow-hidden">
+                <FileIconPreview
+                  fileName={uploadedFileName}
+                  fileType={uploadedType === 'text' ? 'text/plain' : 'application/octet-stream'}
+                  size="md"
+                />
+                <div className="truncate">
+                  <p className="text-sm font-medium text-white truncate line-through decoration-zinc-500">
+                    {uploadedType === 'file' ? uploadedFileName : 'Text Note'}
+                  </p>
+                  <p className="text-xs text-red-400 font-medium">
+                    Permanently removed
+                  </p>
+                </div>
+              </div>
+
+              <span className="text-xs px-2.5 py-1 rounded-lg bg-red-950/40 border border-red-500/30 text-red-300 font-mono">
+                Code {pin}
+              </span>
+            </div>
+
+            {/* Action to send another */}
+            <div className="pt-2">
+              <button
+                onClick={onReset}
+                className="px-6 py-2.5 rounded-xl bg-white text-black text-xs font-semibold hover:bg-zinc-200 transition-all cursor-pointer shadow-md flex items-center space-x-2"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Send another file</span>
+              </button>
+            </div>
+          </motion.div>
+        ) : isUploaded ? (
+          /* STATE 2: READY TO SHARE */
           <motion.div
             key="ready-state"
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.98 }}
-            className="w-full relative border border-zinc-800 rounded-3xl p-6 sm:p-10 bg-zinc-900/60 flex flex-col items-center text-center space-y-6 shadow-2xl backdrop-blur-md"
+            className="w-full relative border border-zinc-800/80 rounded-3xl p-6 sm:p-10 bg-[#111113] flex flex-col items-center text-center space-y-6 shadow-2xl"
           >
-            {/* Header Status */}
             <div className="flex flex-wrap items-center justify-center gap-2">
               <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
@@ -490,7 +527,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
               </div>
 
               {e2eKeyString && (
-                <div className="flex items-center space-x-1.5 px-3 py-1 rounded-full bg-zinc-800 text-zinc-300 text-xs">
+                <div className="flex items-center space-x-1.5 px-3 py-1 rounded-full bg-zinc-800/80 text-zinc-300 text-xs">
                   <ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />
                   <span>End-to-End Encrypted</span>
                 </div>
@@ -506,7 +543,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
               </p>
             </div>
 
-            {/* Live Recipient Event Notification */}
+            {/* Recipient status update */}
             {lastEventMessage && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
@@ -541,7 +578,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
               <div className="flex items-center space-x-2 flex-shrink-0">
                 <span className="text-xs px-2.5 py-1 rounded-lg bg-zinc-800 text-zinc-400 flex items-center space-x-1">
                   <Clock className="w-3 h-3" />
-                  <span>{formatDurationText(ttlSeconds)}</span>
+                  <span>{EXPIRY_OPTIONS.find((o) => o.value === ttlSeconds)?.label || `${Math.round(ttlSeconds / 60)} min`}</span>
                 </span>
               </div>
             </div>
@@ -596,245 +633,223 @@ export const DropZone: React.FC<DropZoneProps> = ({
             </div>
           </motion.div>
         ) : (
-          /* STATE: UPLOAD FORM */
+          /* STATE 3: UPLOAD FORM */
           <motion.div
             key="upload-form"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="w-full flex flex-col space-y-6"
+            className="w-full flex flex-col space-y-3"
           >
-            {/* Top Toolbar: Switch tabs (File vs Text) + Expiry & Options */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              {/* File / Text Tabs */}
-              <div className="flex items-center space-x-1 bg-zinc-900 border border-zinc-800 p-1 rounded-xl">
-                <button
-                  id="tab-mode-file"
-                  onClick={() => {
-                    setActiveTab('file');
-                  }}
-                  className={`text-xs font-medium px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
-                    activeTab === 'file'
-                      ? 'bg-zinc-800 text-white shadow-sm'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Send File
-                </button>
-                <button
-                  id="tab-mode-text"
-                  onClick={() => {
-                    setActiveTab('text');
-                    setSelectedFile(null);
-                  }}
-                  className={`text-xs font-medium px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
-                    activeTab === 'text'
-                      ? 'bg-zinc-800 text-white shadow-sm'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Send Note
-                </button>
-              </div>
-
-              {/* Options: Expiry Presets + Download Limit */}
-              <div className="flex flex-wrap items-center gap-2">
-                {/* Expiry Selector */}
-                <div id="ttl-selector-container" className="flex items-center space-x-1 bg-zinc-900 border border-zinc-800 p-1 rounded-xl">
-                  <div className="flex items-center px-1.5 text-zinc-500">
-                    <Clock className="w-3 h-3" />
-                  </div>
-                  {EXPIRY_PRESETS.map((preset) => (
-                    <button
-                      key={preset.value}
-                      id={`ttl-preset-${preset.label}`}
-                      onClick={() => {
-                        setTtlSeconds(preset.value);
-                        setShowCustomExpiry(false);
-                      }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                        ttlSeconds === preset.value && !showCustomExpiry
-                          ? 'bg-zinc-800 text-white font-semibold shadow-sm'
-                          : 'text-zinc-400 hover:text-white'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                  <button
-                    id="ttl-custom-toggle"
-                    onClick={() => setShowCustomExpiry(!showCustomExpiry)}
-                    title="Customize expiry time"
-                    className={`p-1.5 rounded-lg text-xs transition-all cursor-pointer ${
-                      showCustomExpiry ? 'bg-zinc-800 text-[#FF3B30]' : 'text-zinc-500 hover:text-zinc-300'
-                    }`}
-                  >
-                    <SlidersHorizontal className="w-3 h-3" />
-                  </button>
-                </div>
-
-                {/* Download Limit: Single download vs Multiple */}
-                <div id="share-policy-container" className="flex items-center space-x-1 bg-zinc-900 border border-zinc-800 p-1 rounded-xl">
-                  <button
-                    id="policy-burn-on-read"
-                    onClick={() => setShareMode('burn_on_read')}
-                    title="File is deleted immediately after the first download"
-                    className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                      shareMode === 'burn_on_read'
-                        ? 'bg-zinc-800 text-white font-semibold shadow-sm'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    <Lock className="w-3 h-3 text-red-400" />
-                    <span>Single download</span>
-                  </button>
-                  <button
-                    id="policy-multiple-reads"
-                    onClick={() => setShareMode('multiple_reads')}
-                    title="Allow multiple downloads before expiry"
-                    className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                      shareMode === 'multiple_reads'
-                        ? 'bg-zinc-800 text-white font-semibold shadow-sm'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    <Users className="w-3 h-3 text-zinc-400" />
-                    <span>Multiple</span>
-                  </button>
-                </div>
-
-                {/* Custom 4-digit code toggle */}
-                <button
-                  id="toggle-custom-pin-btn"
-                  onClick={() => setUseCustomPin(!useCustomPin)}
-                  title="Choose your own 4-digit code"
-                  className={`flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs border transition-all cursor-pointer ${
-                    useCustomPin
-                      ? 'bg-zinc-800 border-zinc-700 text-white font-semibold'
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  <KeyRound className="w-3.5 h-3.5" />
-                  <span>Custom code</span>
-                </button>
-              </div>
+            {/* 1. TOP TABS: File / Note */}
+            <div className="flex items-center space-x-1 p-1 rounded-2xl bg-[#141416] border border-zinc-800/80 w-fit">
+              <button
+                id="tab-mode-file"
+                onClick={() => setActiveTab('file')}
+                className={`px-4 py-1.5 rounded-xl text-sm font-semibold transition-all cursor-pointer ${
+                  activeTab === 'file'
+                    ? 'bg-zinc-800 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                File
+              </button>
+              <button
+                id="tab-mode-text"
+                onClick={() => {
+                  setActiveTab('note');
+                  setSelectedFile(null);
+                }}
+                className={`px-4 py-1.5 rounded-xl text-sm font-medium transition-all cursor-pointer ${
+                  activeTab === 'note'
+                    ? 'bg-zinc-800 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Note
+              </button>
             </div>
 
-            {/* Custom Expiry Slider Drawer */}
-            <AnimatePresence>
-              {showCustomExpiry && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
-                >
-                  <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex items-center space-x-4">
-                    <span className="text-xs text-zinc-400 flex-shrink-0">
-                      Expiration time:
-                    </span>
-                    <input
-                      type="range"
-                      min={60}
-                      max={3600}
-                      step={60}
-                      value={ttlSeconds}
-                      onChange={(e) => setTtlSeconds(Number(e.target.value))}
-                      className="w-full accent-[#FF3B30] cursor-pointer"
-                    />
-                    <span className="text-xs font-semibold text-white w-16 text-right">
-                      {formatDurationText(ttlSeconds)}
-                    </span>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+            {/* 2. DROP ZONE CONTAINER */}
+            {activeTab === 'note' ? (
+              /* NOTE WRITER */
+              <div className="relative w-full border border-zinc-800/80 rounded-3xl p-6 sm:p-8 bg-[#111113] flex flex-col space-y-4">
+                <div className="flex justify-between items-center text-xs text-zinc-400">
+                  <span className="font-medium text-white">Write or Paste Note</span>
+                  <span>{textContent.length} characters</span>
+                </div>
 
-            {/* Custom 4-Digit Code Input Drawer */}
-            <AnimatePresence>
-              {useCustomPin && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
-                >
-                  <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center space-x-2 text-xs text-zinc-300">
-                      <KeyRound className="w-4 h-4 text-zinc-400" />
-                      <span>Choose your 4-digit code:</span>
-                    </div>
+                <textarea
+                  id="text-payload-input"
+                  value={textContent}
+                  onChange={(e) => setTextContent(e.target.value)}
+                  placeholder="Paste confidential notes, credentials, passwords, or messages here..."
+                  rows={5}
+                  className="w-full bg-transparent text-sm text-zinc-200 placeholder-zinc-500 outline-none resize-none leading-relaxed font-mono"
+                />
 
-                    <div className="flex items-center space-x-3">
-                      <input
-                        type="text"
-                        id="custom-pin-field"
-                        maxLength={4}
-                        placeholder="e.g. 7788"
-                        value={customPinInput}
-                        onChange={(e) => {
-                          const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 4);
-                          setCustomPinInput(val);
-                        }}
-                        className="w-24 px-3 py-1.5 rounded-lg bg-black/60 border border-zinc-700 text-center font-mono text-base font-semibold text-white tracking-widest focus:border-white outline-none"
-                      />
+                <div className="flex justify-end pt-1">
+                  <button
+                    id="drop-text-payload-btn"
+                    onClick={() => triggerSendCountdown('text')}
+                    disabled={isLoading || !textContent.trim() || undoCountdown !== null}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs font-semibold hover:bg-zinc-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-md"
+                  >
+                    <span>Send Note</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ) : selectedFile ? (
+              /* SELECTED FILE PREVIEW */
+              <div className="relative w-full border border-zinc-800/80 rounded-3xl p-8 bg-[#111113] flex flex-col items-center text-center space-y-4">
+                <FileIconPreview
+                  fileName={selectedFile.file.name}
+                  fileType={selectedFile.file.type}
+                  dataUrl={selectedFile.dataUrl}
+                  size="lg"
+                />
 
-                      {customPinInput.length === 4 && (
-                        <div className="text-xs flex items-center space-x-1">
-                          {customPinAvailability.checking ? (
-                            <span className="text-zinc-500">Checking...</span>
-                          ) : customPinAvailability.available ? (
-                            <span className="text-emerald-400 flex items-center space-x-1 font-medium">
-                              <Check className="w-3.5 h-3.5" />
-                              <span>Available</span>
-                            </span>
-                          ) : (
-                            <span className="text-amber-400 flex items-center space-x-1">
-                              <AlertTriangle className="w-3.5 h-3.5" />
-                              <span>{customPinAvailability.message || 'Taken'}</span>
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                <div className="space-y-1">
+                  <h4 className="text-base font-semibold text-white max-w-sm truncate">
+                    {selectedFile.file.name}
+                  </h4>
+                  <p className="text-xs text-zinc-400">
+                    {formatFriendlyFileSize(selectedFile.file.size)} • {getFileTypeInfo(selectedFile.file.name, selectedFile.file.type).label}
+                  </p>
+                </div>
 
-            {/* Multi-download limit drawer */}
-            <AnimatePresence>
-              {shareMode === 'multiple_reads' && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
-                >
-                  <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center space-x-2 text-xs text-zinc-400">
-                      <Hash className="w-3.5 h-3.5 text-zinc-500" />
-                      <span>Download limit:</span>
-                    </div>
-                    <div className="flex items-center space-x-1.5">
-                      {MAX_DOWNLOAD_PRESETS.map((p) => (
-                        <button
-                          key={p.label}
-                          onClick={() => setMaxReads(p.value)}
-                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                            maxReads === p.value
-                              ? 'bg-zinc-800 text-white font-semibold'
-                              : 'text-zinc-400 hover:text-white'
-                          }`}
-                        >
-                          {p.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                <div className="flex items-center space-x-3 pt-2">
+                  <button
+                    id="cancel-file-btn"
+                    onClick={() => setSelectedFile(null)}
+                    disabled={undoCountdown !== null}
+                    className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-medium transition-all cursor-pointer"
+                  >
+                    Change File
+                  </button>
+
+                  <button
+                    id="drop-selected-file-btn"
+                    onClick={() => triggerSendCountdown('file')}
+                    disabled={isLoading || isProcessingFile || undoCountdown !== null}
+                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs font-semibold hover:bg-zinc-200 transition-all cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <span>{isProcessingFile ? 'Processing...' : 'Send File'}</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* MAIN DROP ZONE */
+              <div
+                {...getRootProps()}
+                id="file-dropzone-container"
+                className={`relative w-full border border-dashed rounded-3xl p-12 sm:p-14 bg-[#111113] flex flex-col items-center justify-center text-center transition-all cursor-pointer ${
+                  isDragActive
+                    ? 'border-white bg-zinc-900/60 scale-[0.99]'
+                    : 'border-zinc-700/60 hover:border-zinc-500'
+                }`}
+              >
+                <input {...getInputProps()} id="file-upload-input" />
+
+                {/* Arrow Up Icon Box */}
+                <div className="w-12 h-12 rounded-xl bg-zinc-800/70 border border-zinc-700/50 flex items-center justify-center mb-4 shadow-sm">
+                  <ArrowUp className="w-5 h-5 text-white stroke-[2.5]" />
+                </div>
+
+                {/* Heading */}
+                <h3 className="text-lg sm:text-xl font-semibold text-white tracking-tight">
+                  {isDragActive ? 'Release to select this file' : 'Drop a file here or click to browse'}
+                </h3>
+
+                {/* Subtitle */}
+                <p className="text-sm text-zinc-400 mt-1.5">
+                  Up to 50 MB. Encrypted in memory.
+                </p>
+              </div>
+            )}
+
+            {/* 3. OPTIONS CARD (Row 1 Delete after, Row 2 Downloads - overflow-visible so dropdown is NEVER cut off) */}
+            <div className="w-full bg-[#111113] border border-zinc-800/80 rounded-2xl divide-y divide-zinc-800/60 relative overflow-visible z-20">
+              {/* Row 1: Delete after */}
+              <div id="ttl-selector-container" className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:px-6 gap-3">
+                <span className="text-sm font-medium text-zinc-400">
+                  Delete after
+                </span>
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                  {EXPIRY_OPTIONS.map((opt) => {
+                    const isSelected = ttlSeconds === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        id={`ttl-preset-${opt.label.replace(' ', '-')}`}
+                        onClick={() => setTtlSeconds(opt.value)}
+                        className={`rounded-full px-4 py-1.5 text-sm font-medium transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-white text-black font-semibold shadow-sm'
+                            : 'bg-zinc-800/40 hover:bg-zinc-800 text-zinc-300 hover:text-white'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Row 2: Downloads */}
+              <div id="share-policy-container" className="flex items-center justify-between p-4 sm:px-6 overflow-visible relative">
+                <span className="text-sm font-medium text-zinc-400">
+                  Downloads
+                </span>
+
+                <div className="relative" ref={dropdownRef}>
+                  <button
+                    id="downloads-dropdown-btn"
+                    onClick={() => setIsDownloadDropdownOpen(!isDownloadDropdownOpen)}
+                    className="flex items-center space-x-2 bg-zinc-800/70 hover:bg-zinc-800 border border-zinc-700/50 rounded-xl px-4 py-2 text-sm text-white font-medium transition-colors cursor-pointer"
+                  >
+                    <span>{currentDownloadOption.label}</span>
+                    <ChevronDown className={`w-4 h-4 text-zinc-400 transition-transform ${isDownloadDropdownOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  <AnimatePresence>
+                    {isDownloadDropdownOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute right-0 bottom-full mb-2 w-56 bg-zinc-900 border border-zinc-700/90 rounded-2xl py-1.5 shadow-2xl z-[100] overflow-hidden"
+                      >
+                        {DOWNLOAD_OPTIONS.map((opt) => {
+                          const isSelected = currentDownloadOption.label === opt.label;
+                          return (
+                            <button
+                              key={opt.label}
+                              onClick={() => {
+                                setShareMode(opt.mode);
+                                setMaxReads(opt.maxReads);
+                                setIsDownloadDropdownOpen(false);
+                              }}
+                              className={`w-full px-4 py-2.5 text-left text-sm flex items-center justify-between transition-colors cursor-pointer ${
+                                isSelected
+                                  ? 'bg-zinc-800 text-white font-medium'
+                                  : 'text-zinc-300 hover:bg-zinc-800/60 hover:text-white'
+                              }`}
+                            >
+                              <span>{opt.label}</span>
+                              {isSelected && <Check className="w-4 h-4 text-white" />}
+                            </button>
+                          );
+                        })}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </div>
+            </div>
 
             {/* 5-SECOND REVERSIBLE SENDING BANNER */}
             <AnimatePresence>
@@ -846,7 +861,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
                   className="w-full p-4 rounded-2xl bg-zinc-900 border border-zinc-700 text-white flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl backdrop-blur-md"
                 >
                   <div className="flex items-center space-x-3">
-                    <div className="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center font-mono font-bold text-sm shadow-md">
+                    <div className="w-8 h-8 rounded-full bg-white text-black flex items-center justify-center font-mono font-bold text-sm shadow-md">
                       {undoCountdown}s
                     </div>
                     <div className="text-left">
@@ -911,108 +926,12 @@ export const DropZone: React.FC<DropZoneProps> = ({
                 </div>
                 <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                   <motion.div
-                    className="h-full bg-[#FF3B30]"
+                    className="h-full bg-white"
                     initial={{ width: '0%' }}
                     animate={{ width: `${uploadProgress}%` }}
                     transition={{ ease: 'easeOut', duration: 0.2 }}
                   />
                 </div>
-              </div>
-            )}
-
-            {/* FILE OR TEXT INPUT */}
-            {activeTab === 'text' ? (
-              /* TEXT NOTE WRITER */
-              <div className="relative w-full border border-zinc-800 rounded-3xl bg-zinc-900/60 p-5 sm:p-6 flex flex-col space-y-4 focus-within:border-zinc-700 transition-colors shadow-lg">
-                <div className="flex justify-between items-center text-xs text-zinc-400">
-                  <span className="font-medium">Write or Paste Note</span>
-                  <span>{textContent.length} characters</span>
-                </div>
-
-                <textarea
-                  id="text-payload-input"
-                  value={textContent}
-                  onChange={(e) => setTextContent(e.target.value)}
-                  placeholder="Paste confidential notes, passwords, or messages here..."
-                  rows={6}
-                  className="w-full bg-transparent text-sm text-zinc-200 placeholder-zinc-600 outline-none resize-none leading-relaxed font-mono"
-                />
-
-                <div className="flex justify-end pt-2">
-                  <button
-                    id="drop-text-payload-btn"
-                    onClick={() => triggerSendCountdown('text')}
-                    disabled={isLoading || !textContent.trim() || undoCountdown !== null}
-                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs uppercase tracking-wider font-semibold hover:bg-zinc-200 transition-all disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer shadow-md"
-                  >
-                    <span>Send Note</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            ) : selectedFile ? (
-              /* SELECTED FILE PREVIEW */
-              <div className="relative w-full border border-zinc-800 rounded-3xl bg-zinc-900/60 p-8 flex flex-col items-center text-center space-y-4 shadow-lg">
-                <FileIconPreview
-                  fileName={selectedFile.file.name}
-                  fileType={selectedFile.file.type}
-                  dataUrl={selectedFile.dataUrl}
-                  size="lg"
-                />
-
-                <div className="space-y-1">
-                  <h4 className="text-base font-medium text-white max-w-sm truncate">
-                    {selectedFile.file.name}
-                  </h4>
-                  <p className="text-xs text-zinc-400">
-                    {formatFriendlyFileSize(selectedFile.file.size)} • {getFileTypeInfo(selectedFile.file.name, selectedFile.file.type).label}
-                  </p>
-                </div>
-
-                <div className="flex items-center space-x-3 pt-2">
-                  <button
-                    id="cancel-file-btn"
-                    onClick={() => setSelectedFile(null)}
-                    disabled={undoCountdown !== null}
-                    className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-medium transition-all cursor-pointer"
-                  >
-                    Change File
-                  </button>
-
-                  <button
-                    id="drop-selected-file-btn"
-                    onClick={() => triggerSendCountdown('file')}
-                    disabled={isLoading || isProcessingFile || undoCountdown !== null}
-                    className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-white text-black text-xs uppercase tracking-wider font-semibold hover:bg-zinc-200 transition-all cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <span>{isProcessingFile ? 'Processing...' : 'Send File'}</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* DRAG & DROP ZONE */
-              <div
-                {...getRootProps()}
-                id="file-dropzone-container"
-                className={`relative w-full border-2 border-dashed rounded-3xl p-10 sm:p-14 flex flex-col items-center text-center justify-center transition-all cursor-pointer group ${
-                  isDragActive
-                    ? 'border-[#FF3B30] bg-[#FF3B30]/5 scale-[0.99]'
-                    : 'border-zinc-800 hover:border-zinc-600 bg-zinc-900/40 hover:bg-zinc-900/60'
-                }`}
-              >
-                <input {...getInputProps()} id="file-upload-input" />
-
-                <div className="w-14 h-14 rounded-2xl bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform shadow-sm">
-                  <Upload className="w-6 h-6 text-zinc-300 group-hover:text-white transition-colors" />
-                </div>
-
-                <h3 className="text-base sm:text-lg font-normal text-white tracking-tight">
-                  {isDragActive ? 'Release to select this file' : 'Drop any file here or click to browse'}
-                </h3>
-                <p className="text-xs text-zinc-400 mt-1">
-                  Files up to 50MB • Encrypted in memory • Automatically deleted after download
-                </p>
               </div>
             )}
           </motion.div>

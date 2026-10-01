@@ -7,13 +7,11 @@ import {
   AlertCircle,
   ArrowLeft,
   Clock,
-  ExternalLink,
   ShieldCheck,
-  FileText,
   FileCheck,
   Send,
-  Lock,
   Eye,
+  Trash2,
 } from 'lucide-react';
 import { BurnerFileMetadata, BurnerPayload, CheckPayloadResponse, ApiErrorDetail } from '../types';
 import {
@@ -52,6 +50,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
   const [lockoutSeconds, setLockoutSeconds] = useState<number | null>(null);
   const [inspectedMeta, setInspectedMeta] = useState<CheckPayloadResponse | null>(null);
   const [retrievedPayload, setRetrievedPayload] = useState<BurnerPayload | null>(null);
+  const [isFileDeleted, setIsFileDeleted] = useState(false);
   const [decryptedText, setDecryptedText] = useState<string | null>(null);
   const [decryptedFile, setDecryptedFile] = useState<BurnerFileMetadata | null>(null);
   const [e2eKeyString, setE2eKeyString] = useState<string>(initialKey);
@@ -105,11 +104,45 @@ export const PickupView: React.FC<PickupViewProps> = ({
     }
   }, [initialPin]);
 
+  // Real-time SSE listener for current PIN to detect deletion instantly
+  const activePinString = digits.join('');
+  useEffect(() => {
+    if (activePinString.length !== 4) return;
+
+    const sseUrl = `/api/events/${activePinString}`;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(sseUrl);
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.isBurned || data.type === 'burned' || data.message === 'File has been deleted.') {
+            setIsFileDeleted(true);
+          } else if (data.type === 'pickup' && typeof data.readCount === 'number') {
+            setInspectedMeta((prev) => (prev ? { ...prev, readCount: data.readCount } : null));
+          }
+        } catch {
+          // ignore parse errors
+        }
+      };
+      es.onerror = () => {
+        es?.close();
+      };
+    } catch {
+      // ignore connection error
+    }
+
+    return () => {
+      es?.close();
+    };
+  }, [activePinString]);
+
   // Non-destructive check on PIN with BurnerApi client
   const handleInspectPayload = async (pinCode: string) => {
     setIsChecking(true);
     setApiError(null);
     setInspectedMeta(null);
+    setIsFileDeleted(false);
 
     try {
       const data = await BurnerApi.checkPayload(pinCode);
@@ -118,7 +151,15 @@ export const PickupView: React.FC<PickupViewProps> = ({
       }
     } catch (err: any) {
       const normalized = normalizeApiError(err);
-      setApiError(normalized);
+      if (
+        normalized.code === 'FILE_DELETED' ||
+        normalized.message?.toLowerCase().includes('deleted') ||
+        normalized.message?.toLowerCase().includes('incinerated')
+      ) {
+        setIsFileDeleted(true);
+      } else {
+        setApiError(normalized);
+      }
       if (normalized.retryAfter) {
         setLockoutSeconds(Number(normalized.retryAfter));
       }
@@ -128,6 +169,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
   };
 
   const handleDigitChange = (index: number, value: string) => {
+    setIsFileDeleted(false);
     if (value.length > 1) {
       const cleaned = value.replace(/[^0-9]/g, '').slice(0, 4);
       if (cleaned.length === 4) {
@@ -158,12 +200,12 @@ export const PickupView: React.FC<PickupViewProps> = ({
     if (e.key === 'Backspace' && !digits[index] && index > 0) {
       inputRefs[index - 1].current?.focus();
     } else if (e.key === 'Enter') {
-      const activePin = digits.join('');
-      if (activePin.length === 4) {
+      const pinCode = digits.join('');
+      if (pinCode.length === 4) {
         if (inspectedMeta) {
-          handleExplicitPickup(activePin);
+          handleExplicitPickup(pinCode);
         } else {
-          handleInspectPayload(activePin);
+          handleInspectPayload(pinCode);
         }
       }
     }
@@ -181,6 +223,10 @@ export const PickupView: React.FC<PickupViewProps> = ({
       setDownloadProgress(45);
       const data = await BurnerApi.pickupPayload(pinCode);
       setDownloadProgress(70);
+
+      if (data.isBurned) {
+        setIsFileDeleted(true);
+      }
 
       if (data.success && data.payload) {
         const payload: BurnerPayload = data.payload;
@@ -266,7 +312,15 @@ export const PickupView: React.FC<PickupViewProps> = ({
       }
     } catch (err: any) {
       const normalized = normalizeApiError(err);
-      setApiError(normalized);
+      if (
+        normalized.code === 'FILE_DELETED' ||
+        normalized.message?.toLowerCase().includes('deleted') ||
+        normalized.message?.toLowerCase().includes('incinerated')
+      ) {
+        setIsFileDeleted(true);
+      } else {
+        setApiError(normalized);
+      }
       if (normalized.retryAfter) {
         setLockoutSeconds(Number(normalized.retryAfter));
       }
@@ -380,7 +434,16 @@ export const PickupView: React.FC<PickupViewProps> = ({
     await openDataUrlInNewTab(targetFile.dataUrl, safeName);
   };
 
-  const activePinString = digits.join('');
+  const handleResetCode = () => {
+    setIsFileDeleted(false);
+    setDigits(['', '', '', '']);
+    setInspectedMeta(null);
+    setRetrievedPayload(null);
+    setDecryptedFile(null);
+    setDecryptedText(null);
+    setApiError(null);
+    inputRefs[0].current?.focus();
+  };
 
   // Resolve display name, size, and label for inspected file preview
   const inspectedName = inspectedMeta?.fileMeta?.name || 'Shared File';
@@ -402,8 +465,50 @@ export const PickupView: React.FC<PickupViewProps> = ({
   return (
     <div className="w-full max-w-xl flex flex-col items-center select-none">
       <AnimatePresence mode="wait">
-        {!retrievedPayload ? (
-          /* STEP 1: ENTER CODE & PREVIEW FILE */
+        {/* STATE A: FILE HAS BEEN DELETED (Before retrieval, e.g. download limit was reached) */}
+        {isFileDeleted && !retrievedPayload ? (
+          <motion.div
+            key="deleted-receive-state"
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            className="w-full max-w-md p-6 sm:p-8 rounded-3xl bg-[#141010] border border-red-500/30 flex flex-col items-center text-center space-y-6 shadow-2xl"
+          >
+            <div className="w-12 h-12 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-400">
+              <Trash2 className="w-6 h-6 text-red-400" />
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-semibold mb-1">
+                <span>File has been deleted</span>
+              </div>
+              <h3 className="text-xl sm:text-2xl font-light text-white tracking-tight">
+                File has been deleted
+              </h3>
+              <p className="text-xs sm:text-sm text-zinc-400 max-w-sm mx-auto leading-relaxed">
+                The set limit of downloads has been reached for code{' '}
+                <span className="font-mono text-white font-semibold">{activePinString || initialPin}</span>.
+                This transfer has been automatically and permanently deleted from the server.
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center gap-3 w-full pt-2">
+              <button
+                onClick={handleResetCode}
+                className="w-full py-3 px-5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold transition-all cursor-pointer"
+              >
+                Enter another code
+              </button>
+              <button
+                onClick={onReturnToDrop}
+                className="w-full py-3 px-5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-semibold transition-all cursor-pointer"
+              >
+                Send a file
+              </button>
+            </div>
+          </motion.div>
+        ) : !retrievedPayload ? (
+          /* STATE B: ENTER CODE & PREVIEW FILE */
           <motion.div
             key="code-entry"
             initial={{ opacity: 0, y: 8 }}
@@ -448,7 +553,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
                 </div>
                 <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                   <motion.div
-                    className="h-full bg-[#FF3B30]"
+                    className="h-full bg-white"
                     initial={{ width: '0%' }}
                     animate={{ width: `${downloadProgress}%` }}
                     transition={{ ease: 'easeOut', duration: 0.2 }}
@@ -481,22 +586,10 @@ export const PickupView: React.FC<PickupViewProps> = ({
               </motion.div>
             )}
 
-            {/* SKELETON PREVIEW WHILE CHECKING CODE */}
-            {isChecking && (
-              <div className="w-full max-w-md p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex flex-col space-y-4 text-center items-center animate-pulse">
-                <div className="w-12 h-12 rounded-xl bg-zinc-800" />
-                <div className="space-y-2 w-full flex flex-col items-center">
-                  <div className="h-4 bg-zinc-800 rounded w-2/3" />
-                  <div className="h-3 bg-zinc-800/60 rounded w-1/3" />
-                </div>
-                <div className="h-11 bg-zinc-800 rounded-xl w-full" />
-              </div>
-            )}
-
-            {/* PREVIEW CARD: SHOWN ONCE CODE IS ENTERED */}
-            {!isChecking && inspectedMeta && (
+            {/* PREVIEW CARD ONCE 4 DIGITS VALIDATED */}
+            {inspectedMeta && (
               <motion.div
-                initial={{ opacity: 0, scale: 0.98 }}
+                initial={{ opacity: 0, scale: 0.97 }}
                 animate={{ opacity: 1, scale: 1 }}
                 className="w-full max-w-md p-6 rounded-2xl bg-zinc-900/70 border border-zinc-700/60 flex flex-col space-y-4 shadow-xl text-center items-center"
               >
@@ -532,7 +625,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
 
                   {inspectedMeta.shareMode === 'multiple_reads' ? (
                     <span className="px-2.5 py-1 rounded-lg bg-zinc-800/80 border border-zinc-700/50 text-zinc-300">
-                      Multi-download
+                      {inspectedMeta.maxReads ? `${inspectedMeta.maxReads} downloads limit` : 'Multi-download'}
                     </span>
                   ) : (
                     <span className="px-2.5 py-1 rounded-lg bg-red-950/40 border border-red-500/30 text-red-300">
@@ -542,7 +635,9 @@ export const PickupView: React.FC<PickupViewProps> = ({
                 </div>
 
                 <p className="text-[11px] text-zinc-400">
-                  {inspectedMeta.shareMode === 'multiple_reads'
+                  {inspectedMeta.shareMode === 'multiple_reads' && inspectedMeta.maxReads
+                    ? `This file will be deleted automatically once ${inspectedMeta.maxReads} downloads are completed.`
+                    : inspectedMeta.shareMode === 'multiple_reads'
                     ? 'This file will remain available until the expiration timer ends.'
                     : 'This file will be deleted from the server once downloaded.'}
                 </p>
@@ -587,7 +682,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
             )}
           </motion.div>
         ) : needsManualKey ? (
-          /* STEP 2A: PROMPT FOR KEY IF ENCRYPTED WITHOUT LINK */
+          /* STATE C: PROMPT FOR KEY IF ENCRYPTED WITHOUT LINK */
           <motion.div
             key="key-prompt"
             initial={{ opacity: 0, scale: 0.98 }}
@@ -619,21 +714,40 @@ export const PickupView: React.FC<PickupViewProps> = ({
             <button
               onClick={handleApplyManualKey}
               disabled={!manualKeyInput.trim()}
-              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold uppercase tracking-wider transition-all cursor-pointer disabled:opacity-40"
+              className="w-full py-3 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-semibold uppercase tracking-wider transition-all cursor-pointer disabled:opacity-40"
             >
               Decrypt & Open
             </button>
           </motion.div>
         ) : (
-          /* STEP 2B: RETRIEVED CONTENT VIEW */
+          /* STATE D: RETRIEVED CONTENT VIEW */
           <motion.div
             key="retrieved-content"
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             className="w-full flex flex-col items-center space-y-6"
           >
-            {/* Status Banner */}
-            {retrievedPayload.shareMode === 'multiple_reads' ? (
+            {/* Status Banner: Auto-updates to 'File has been deleted' if download limit is done */}
+            {isFileDeleted || retrievedPayload.isBurned ? (
+              <div className="w-full p-4 rounded-2xl bg-red-950/20 border border-red-500/30 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-8 h-8 rounded-full bg-red-900/30 flex items-center justify-center text-red-400">
+                    <Trash2 className="w-4 h-4 text-red-400" />
+                  </div>
+                  <div className="text-left">
+                    <p className="text-xs font-semibold text-red-300">
+                      File has been deleted
+                    </p>
+                    <p className="text-[11px] text-zinc-400">
+                      The set limit of downloads has been reached. This file has been permanently deleted from the server.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] uppercase font-mono text-red-300 bg-red-950/40 px-2.5 py-1 rounded-full border border-red-500/40 font-semibold">
+                  Deleted
+                </span>
+              </div>
+            ) : retrievedPayload.shareMode === 'multiple_reads' ? (
               <div className="w-full p-4 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between">
                 <div className="flex items-center space-x-3">
                   <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-300">
@@ -644,7 +758,8 @@ export const PickupView: React.FC<PickupViewProps> = ({
                       File Ready for Download
                     </p>
                     <p className="text-[11px] text-zinc-400">
-                      Download #{retrievedPayload.readCount || 1} • Available until expiry.
+                      Download #{retrievedPayload.readCount || 1}
+                      {retrievedPayload.maxReads ? ` of ${retrievedPayload.maxReads}` : ''} • Available until expiry or download limit.
                     </p>
                   </div>
                 </div>
@@ -656,18 +771,18 @@ export const PickupView: React.FC<PickupViewProps> = ({
               <div className="w-full p-4 rounded-2xl bg-red-950/20 border border-red-500/30 flex items-center justify-between">
                 <div className="flex items-center space-x-3">
                   <div className="w-8 h-8 rounded-full bg-red-900/30 flex items-center justify-center text-red-400">
-                    <Check className="w-4 h-4 text-red-400" />
+                    <Trash2 className="w-4 h-4 text-red-400" />
                   </div>
                   <div className="text-left">
                     <p className="text-xs font-semibold text-red-300">
-                      Single Download Complete
+                      File has been deleted
                     </p>
                     <p className="text-[11px] text-zinc-400">
                       This file has been permanently deleted from the server.
                     </p>
                   </div>
                 </div>
-                <span className="text-[10px] uppercase font-mono text-red-300 bg-red-950/40 px-2.5 py-1 rounded-full border border-red-500/40">
+                <span className="text-[10px] uppercase font-mono text-red-300 bg-red-950/40 px-2.5 py-1 rounded-full border border-red-500/40 font-semibold">
                   Deleted
                 </span>
               </div>

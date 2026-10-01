@@ -597,7 +597,7 @@ app.post(["/api/pickup", "/pickup"], (req: Request, res: Response) => {
 
   if (item.shareMode === "burn_on_read" || (item.maxReads && item.readCount >= item.maxReads)) {
     isBurned = true;
-    deletePayloadItem(foundKey, "Retrieved by recipient");
+    deletePayloadItem(foundKey, "Download limit reached");
   }
 
   if (item.file) {
@@ -607,6 +607,7 @@ app.post(["/api/pickup", "/pickup"], (req: Request, res: Response) => {
   return res.json({
     success: true,
     isBurned,
+    message: isBurned ? "File has been deleted." : undefined,
     shareMode: item.shareMode,
     readCount: item.readCount,
     maxReads: item.maxReads,
