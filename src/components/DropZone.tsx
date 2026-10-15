@@ -24,18 +24,21 @@ import {
   ShareMode,
   BurnerFileMetadata,
   EncryptedBundle,
+  KeyVerificationBlob,
   ApiErrorDetail,
 } from '../types';
 import {
   generateE2EKey,
   exportKeyToString,
   encryptData,
+  createVerificationBlob,
   wrapKeyWithPin,
   sanitizeFilename,
   getByteLengthFromDataUrl,
   getFileTypeInfo,
   formatFriendlyFileSize,
 } from '../lib/crypto';
+import { BurnerApi } from '../lib/api';
 import { FileIconPreview } from './FileIconPreview';
 
 interface DropZoneProps {
@@ -66,7 +69,10 @@ interface DropZoneProps {
     encryptedBundle?: EncryptedBundle,
     e2eKeyStr?: string,
     maxReadsSetting?: number,
-    customPin?: string
+    customPin?: string,
+    idempotencyKey?: string,
+    keyVerificationBlob?: KeyVerificationBlob,
+    keyMode?: 'fragment' | 'pin'
   ) => Promise<void>;
   onManualBurn: () => Promise<void>;
   onReset: () => void;
@@ -91,6 +97,7 @@ const DOWNLOAD_OPTIONS = [
 
 export const DropZone: React.FC<DropZoneProps> = ({
   pin,
+  senderToken,
   isUploaded,
   isFileDeleted = false,
   uploadedType,
@@ -207,8 +214,24 @@ export const DropZone: React.FC<DropZoneProps> = ({
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onDrop as any,
     multiple: false,
+    maxFiles: 1,
     maxSize: 50 * 1024 * 1024,
     noClick: activeTab === 'note' || selectedFile !== null,
+    onDropRejected: (fileRejections) => {
+      if (fileRejections.length > 1) {
+        setApiError({
+          code: 'TOO_MANY_FILES',
+          message: 'Only 1 file can be transferred per drop. Please select a single file.',
+          retryable: false,
+        });
+      } else if (fileRejections[0]?.errors[0]?.code === 'file-too-large') {
+        setApiError({
+          code: 'FILE_TOO_LARGE',
+          message: 'Selected file exceeds the 50MB ceiling. Please choose a smaller file.',
+          retryable: false,
+        });
+      }
+    },
   } as any);
 
   const simulateProgress = (): Promise<void> => {
@@ -249,6 +272,11 @@ export const DropZone: React.FC<DropZoneProps> = ({
         retryable: false,
       });
       return;
+    }
+
+    // Immediately stage session on server (state: 'staged')
+    if (pin && pin !== '----' && senderToken) {
+      BurnerApi.stageSession(pin, senderToken).catch(() => {});
     }
 
     setPendingDrop({ type });
@@ -293,6 +321,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
   const executeDropPayload = async (type: 'text' | 'file') => {
     setApiError(null);
     const targetPin = (pin && pin !== '----' && /^[0-9]{4}$/.test(pin) ? pin : undefined) || Math.floor(1000 + Math.random() * 9000).toString();
+    const idempotencyKey = crypto.randomUUID();
 
     try {
       if (type === 'text') {
@@ -301,6 +330,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
           const key = await generateE2EKey();
           const keyStr = await exportKeyToString(key);
           const encryptedBundle = await encryptData(textContent.trim(), key);
+          const verificationBlob = await createVerificationBlob(key);
           try {
             const pinKeyBundle = await wrapKeyWithPin(keyStr, targetPin);
             encryptedBundle.pinKeyBundle = pinKeyBundle;
@@ -317,7 +347,10 @@ export const DropZone: React.FC<DropZoneProps> = ({
             encryptedBundle,
             keyStr,
             maxReads,
-            targetPin
+            targetPin,
+            idempotencyKey,
+            verificationBlob,
+            'fragment'
           );
         } else {
           setE2eKeyString(undefined);
@@ -330,7 +363,8 @@ export const DropZone: React.FC<DropZoneProps> = ({
             undefined,
             undefined,
             maxReads,
-            targetPin
+            targetPin,
+            idempotencyKey
           );
         }
       } else if (type === 'file' && selectedFile) {
@@ -360,6 +394,7 @@ export const DropZone: React.FC<DropZoneProps> = ({
           });
 
           const encryptedBundle = await encryptData(rawJson, key);
+          const verificationBlob = await createVerificationBlob(key);
           try {
             const pinKeyBundle = await wrapKeyWithPin(keyStr, targetPin);
             encryptedBundle.pinKeyBundle = pinKeyBundle;
@@ -377,7 +412,10 @@ export const DropZone: React.FC<DropZoneProps> = ({
             encryptedBundle,
             keyStr,
             maxReads,
-            targetPin
+            targetPin,
+            idempotencyKey,
+            verificationBlob,
+            'fragment'
           );
         } else {
           setE2eKeyString(undefined);
@@ -390,7 +428,8 @@ export const DropZone: React.FC<DropZoneProps> = ({
             undefined,
             undefined,
             maxReads,
-            targetPin
+            targetPin,
+            idempotencyKey
           );
         }
       }

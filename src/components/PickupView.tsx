@@ -25,6 +25,7 @@ import {
   openDataUrlInNewTab,
   getFileTypeInfo,
   formatFriendlyFileSize,
+  verifyKeyWithBlob,
 } from '../lib/crypto';
 import { BurnerApi, normalizeApiError } from '../lib/api';
 import { FileIconPreview } from './FileIconPreview';
@@ -48,6 +49,8 @@ export const PickupView: React.FC<PickupViewProps> = ({
   const [isChecking, setIsChecking] = useState(false);
   const [apiError, setApiError] = useState<ApiErrorDetail | null>(null);
   const [lockoutSeconds, setLockoutSeconds] = useState<number | null>(null);
+  const [slotsBusyCountdown, setSlotsBusyCountdown] = useState<number | null>(null);
+  const [activeBootId, setActiveBootId] = useState<string | null>(null);
   const [inspectedMeta, setInspectedMeta] = useState<CheckPayloadResponse | null>(null);
   const [retrievedPayload, setRetrievedPayload] = useState<BurnerPayload | null>(null);
   const [isFileDeleted, setIsFileDeleted] = useState(false);
@@ -60,6 +63,9 @@ export const PickupView: React.FC<PickupViewProps> = ({
   const [isDownloaded, setIsDownloaded] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [fallbackModalText, setFallbackModalText] = useState<string | null>(null);
+
+  const retryTimerRef = useRef<any>(null);
+  const totalRetrySecondsRef = useRef<number>(0);
 
   const inputRefs = [
     useRef<HTMLInputElement>(null),
@@ -77,6 +83,9 @@ export const PickupView: React.FC<PickupViewProps> = ({
         setE2eKeyString(match[1]);
       }
     }
+    return () => {
+      if (retryTimerRef.current) clearInterval(retryTimerRef.current);
+    };
   }, []);
 
   // Lockout countdown timer
@@ -116,6 +125,18 @@ export const PickupView: React.FC<PickupViewProps> = ({
       es.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          if (data.bootId) {
+            if (activeBootId && activeBootId !== data.bootId) {
+              setIsFileDeleted(true);
+              setApiError({
+                code: 'SERVER_RESTARTED',
+                message: 'Server was restarted. Ephemeral transfer was lost from memory.',
+                retryable: false,
+              });
+              return;
+            }
+            setActiveBootId(data.bootId);
+          }
           if (data.isBurned || data.type === 'burned' || data.message === 'File has been deleted.') {
             setIsFileDeleted(true);
           } else if (data.type === 'pickup' && typeof data.readCount === 'number') {
@@ -135,7 +156,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
     return () => {
       es?.close();
     };
-  }, [activePinString]);
+  }, [activePinString, activeBootId]);
 
   // Non-destructive check on PIN with BurnerApi client
   const handleInspectPayload = async (pinCode: string) => {
@@ -143,9 +164,22 @@ export const PickupView: React.FC<PickupViewProps> = ({
     setApiError(null);
     setInspectedMeta(null);
     setIsFileDeleted(false);
+    setSlotsBusyCountdown(null);
 
     try {
       const data = await BurnerApi.checkPayload(pinCode);
+      if (data.bootId) {
+        if (activeBootId && activeBootId !== data.bootId) {
+          setIsFileDeleted(true);
+          setApiError({
+            code: 'SERVER_RESTARTED',
+            message: 'Server was restarted. Ephemeral transfer was lost from memory.',
+            retryable: false,
+          });
+          return;
+        }
+        setActiveBootId(data.bootId);
+      }
       if (data.exists) {
         setInspectedMeta(data);
       }
@@ -170,6 +204,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
 
   const handleDigitChange = (index: number, value: string) => {
     setIsFileDeleted(false);
+    setSlotsBusyCountdown(null);
     if (value.length > 1) {
       const cleaned = value.replace(/[^0-9]/g, '').slice(0, 4);
       if (cleaned.length === 4) {
@@ -211,18 +246,86 @@ export const PickupView: React.FC<PickupViewProps> = ({
     }
   };
 
-  // Human click: executes /api/pickup & decrypts payload
-  const handleExplicitPickup = async (pinCode: string, providedKey?: string) => {
+  // Human click: executes /api/pickup & decrypts payload with single-flight and key pre-verification
+  const handleExplicitPickup = async (pinCode: string, providedKey?: string, isRetry = false) => {
+    if (!isRetry) {
+      totalRetrySecondsRef.current = 0;
+    }
+    if (retryTimerRef.current) {
+      clearInterval(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    setSlotsBusyCountdown(null);
     setIsLoading(true);
     setApiError(null);
     setDownloadProgress(20);
 
     const activeKeyStr = providedKey || e2eKeyString || manualKeyInput.trim();
 
+    // P0: Pre-verify key before triggering destructive or slot-consuming pickup
+    if (inspectedMeta?.isEncrypted) {
+      let resolvedKeyStr = activeKeyStr;
+
+      if (!resolvedKeyStr && inspectedMeta.keyMode === 'fragment') {
+        setApiError({
+          code: 'KEY_REQUIRED',
+          message: 'This transfer requires the secret key from the full link or QR code.',
+          retryable: false,
+        });
+        setNeedsManualKey(true);
+        setIsLoading(false);
+        setDownloadProgress(null);
+        return;
+      }
+
+      if (resolvedKeyStr && inspectedMeta.verificationBlob) {
+        try {
+          const cryptoKey = await importKeyFromString(resolvedKeyStr);
+          const isValid = await verifyKeyWithBlob(inspectedMeta.verificationBlob, cryptoKey);
+          if (!isValid) {
+            setApiError({
+              code: 'INVALID_KEY',
+              message: 'The decryption key in this link or PIN is incorrect. Transfer was not consumed.',
+              retryable: false,
+            });
+            setNeedsManualKey(true);
+            setIsLoading(false);
+            setDownloadProgress(null);
+            return;
+          }
+        } catch {
+          setApiError({
+            code: 'INVALID_KEY',
+            message: 'Invalid encryption key format.',
+            retryable: false,
+          });
+          setNeedsManualKey(true);
+          setIsLoading(false);
+          setDownloadProgress(null);
+          return;
+        }
+      }
+    }
+
     try {
       setDownloadProgress(45);
       const data = await BurnerApi.pickupPayload(pinCode);
       setDownloadProgress(70);
+
+      if (data.bootId) {
+        if (activeBootId && activeBootId !== data.bootId) {
+          setIsFileDeleted(true);
+          setApiError({
+            code: 'SERVER_RESTARTED',
+            message: 'Server was restarted. Ephemeral transfer was lost from memory.',
+            retryable: false,
+          });
+          setIsLoading(false);
+          setDownloadProgress(null);
+          return;
+        }
+        setActiveBootId(data.bootId);
+      }
 
       if (data.isBurned) {
         setIsFileDeleted(true);
@@ -237,7 +340,6 @@ export const PickupView: React.FC<PickupViewProps> = ({
         if (payload.encryptedBundle?.isEncrypted) {
           let resolvedKeyStr = activeKeyStr;
 
-          // If key is not in URL hash or manual input, automatically unwrap using PIN
           if (!resolvedKeyStr && payload.encryptedBundle.pinKeyBundle && pinCode) {
             try {
               resolvedKeyStr = await unwrapKeyWithPin(payload.encryptedBundle.pinKeyBundle, pinCode);
@@ -312,16 +414,67 @@ export const PickupView: React.FC<PickupViewProps> = ({
       }
     } catch (err: any) {
       const normalized = normalizeApiError(err);
-      if (
+      if (normalized.code === 'SLOTS_BUSY') {
+        const delaySec = normalized.retryAfter || 3;
+        totalRetrySecondsRef.current += delaySec;
+
+        if (totalRetrySecondsRef.current > 120) {
+          // Exceeded 2-minute auto-retry cap
+          if (retryTimerRef.current) {
+            clearInterval(retryTimerRef.current);
+            retryTimerRef.current = null;
+          }
+          setSlotsBusyCountdown(null);
+          setApiError({
+            code: 'SLOTS_BUSY_TIMEOUT',
+            message: 'All download slots remained occupied for over 2 minutes. The file is still intact—click "Retry Pickup" below when ready.',
+            retryable: true,
+          });
+          return;
+        }
+
+        setSlotsBusyCountdown(delaySec);
+        setApiError({
+          code: 'SLOTS_BUSY',
+          message: `All download slots are currently in use. Another recipient is downloading. Retrying automatically in ${delaySec}s... (${Math.max(0, 120 - totalRetrySecondsRef.current)}s auto-retry window remaining)`,
+          retryable: true,
+          retryAfter: delaySec,
+        });
+
+        if (retryTimerRef.current) clearInterval(retryTimerRef.current);
+        let remaining = delaySec;
+        retryTimerRef.current = setInterval(() => {
+          remaining--;
+          if (remaining <= 0) {
+            clearInterval(retryTimerRef.current);
+            retryTimerRef.current = null;
+            setSlotsBusyCountdown(null);
+            setApiError(null);
+            handleExplicitPickup(pinCode, activeKeyStr, true);
+          } else {
+            setSlotsBusyCountdown(remaining);
+          }
+        }, 1000);
+      } else if (
         normalized.code === 'FILE_DELETED' ||
         normalized.message?.toLowerCase().includes('deleted') ||
         normalized.message?.toLowerCase().includes('incinerated')
       ) {
+        if (retryTimerRef.current) {
+          clearInterval(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+        setSlotsBusyCountdown(null);
         setIsFileDeleted(true);
       } else {
+        if (retryTimerRef.current) {
+          clearInterval(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+        setSlotsBusyCountdown(null);
         setApiError(normalized);
       }
-      if (normalized.retryAfter) {
+      if (normalized.retryAfter && normalized.code !== 'SLOTS_BUSY') {
         setLockoutSeconds(Number(normalized.retryAfter));
       }
     } finally {
@@ -562,22 +715,37 @@ export const PickupView: React.FC<PickupViewProps> = ({
               </div>
             )}
 
-            {/* ERROR CARD */}
+            {/* ERROR / STATUS CARD */}
             {apiError && (
               <motion.div
                 initial={{ opacity: 0, scale: 0.98 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="p-4 rounded-xl border text-xs flex items-start space-x-3 max-w-md w-full bg-red-950/20 border-red-500/30 text-red-300"
+                className={`p-4 rounded-xl border text-xs flex items-start space-x-3 max-w-md w-full ${
+                  apiError.code === 'SLOTS_BUSY'
+                    ? 'bg-amber-950/20 border-amber-500/40 text-amber-200'
+                    : 'bg-red-950/20 border-red-500/30 text-red-300'
+                }`}
               >
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-400" />
+                <AlertCircle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${apiError.code === 'SLOTS_BUSY' ? 'text-amber-400' : 'text-red-400'}`} />
                 <div className="flex-1 text-left">
                   <div className="flex items-center space-x-2">
                     <span className="font-semibold text-xs text-red-200">
-                      {apiError.code === 'LOCKED_OUT' ? 'Too Many Attempts' : 'Transfer Unavailable'}
+                      {apiError.code === 'LOCKED_OUT'
+                        ? 'Too Many Attempts'
+                        : apiError.code === 'SLOTS_BUSY'
+                        ? 'Download Slot Busy'
+                        : apiError.code === 'SERVER_RESTARTED'
+                        ? 'Server Restarted'
+                        : 'Transfer Unavailable'}
                     </span>
                     {lockoutSeconds !== null && lockoutSeconds > 0 && (
                       <span className="text-[10px] px-2 py-0.5 rounded bg-black/40 text-amber-300">
                         Try again in {Math.floor(lockoutSeconds / 60)}m {lockoutSeconds % 60}s
+                      </span>
+                    )}
+                    {slotsBusyCountdown !== null && slotsBusyCountdown > 0 && (
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+                        Auto-retry in {slotsBusyCountdown}s
                       </span>
                     )}
                   </div>
@@ -646,12 +814,16 @@ export const PickupView: React.FC<PickupViewProps> = ({
                 <button
                   id="unlock-payload-btn"
                   onClick={() => handleExplicitPickup(activePinString)}
-                  disabled={isLoading}
-                  className="w-full py-3.5 rounded-xl bg-white text-black text-sm font-semibold hover:bg-zinc-200 transition-all shadow-md cursor-pointer flex items-center justify-center space-x-2 active:scale-[0.99]"
+                  disabled={isLoading || isChecking || slotsBusyCountdown !== null}
+                  className="w-full py-3.5 rounded-xl bg-white text-black text-sm font-semibold hover:bg-zinc-200 transition-all shadow-md cursor-pointer flex items-center justify-center space-x-2 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Download className="w-4 h-4" />
                   <span>
-                    {inspectedMeta.shareMode === 'multiple_reads'
+                    {slotsBusyCountdown !== null
+                      ? `Slots busy, retrying in ${slotsBusyCountdown}s...`
+                      : isLoading
+                      ? 'Downloading...'
+                      : inspectedMeta.shareMode === 'multiple_reads'
                       ? 'Download File'
                       : 'Download & Delete'}
                   </span>

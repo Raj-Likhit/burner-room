@@ -13,7 +13,7 @@ import { CountdownTimer } from './components/CountdownTimer';
 import { Footer } from './components/Footer';
 import { SpotlightOnboarding } from './components/SpotlightOnboarding';
 import { OfflineBanner } from './components/OfflineBanner';
-import { BurnerFileMetadata, EncryptedBundle, PayloadType, ShareMode, StoredSenderSession } from './types';
+import { BurnerFileMetadata, EncryptedBundle, KeyVerificationBlob, PayloadType, ShareMode, StoredSenderSession } from './types';
 import { updateTabTitle, setFavicon } from './lib/favicon';
 import { BurnerApi, normalizeApiError } from './lib/api';
 import { Flame, ShieldCheck, Activity, CheckCircle2, AlertTriangle, ShieldAlert } from 'lucide-react';
@@ -41,6 +41,9 @@ export default function App() {
   const [isFileDeleted, setIsFileDeleted] = useState<boolean>(false);
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
   const [isOffline, setIsOffline] = useState<boolean>(!navigator.onLine);
+
+  const [bootId, setBootId] = useState<string | null>(null);
+  const bootIdRef = useRef<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -113,6 +116,10 @@ export default function App() {
       setPin(data.pin);
       setSenderToken(data.senderToken);
       setExpiresAt(data.expiresAt);
+      if (data.bootId) {
+        setBootId(data.bootId);
+        bootIdRef.current = data.bootId;
+      }
       if (data.ttlSeconds) {
         setTtlSeconds(data.ttlSeconds);
       }
@@ -241,7 +248,25 @@ export default function App() {
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'pickup') {
+        if (data.bootId) {
+          if (bootIdRef.current && bootIdRef.current !== data.bootId) {
+            setIsFileDeleted(true);
+            setBurnedNotice('Server restarted, transfer lost.');
+            setLastEventMessage('Server restarted, transfer lost.');
+            sessionStorage.removeItem(SESSION_STORAGE_KEY);
+            return;
+          }
+          bootIdRef.current = data.bootId;
+        }
+
+        if (data.type === 'snapshot') {
+          if (typeof data.readCount === 'number') {
+            setLiveReadCount(data.readCount);
+          }
+          if (data.remainingMs && data.remainingMs > 0) {
+            setExpiresAt(Date.now() + data.remainingMs);
+          }
+        } else if (data.type === 'pickup') {
           setLiveReadCount(data.readCount || 1);
           if (data.isBurned) {
             setIsFileDeleted(true);
@@ -314,7 +339,10 @@ export default function App() {
     encryptedBundle?: EncryptedBundle,
     e2eKeyStr?: string,
     maxReadsSetting?: number,
-    customPin?: string
+    customPin?: string,
+    idempotencyKey?: string,
+    keyVerificationBlob?: KeyVerificationBlob,
+    keyMode?: 'fragment' | 'pin'
   ) => {
     setIsLoading(true);
     const activeShareMode = modeSetting || shareMode;
@@ -326,6 +354,7 @@ export default function App() {
       const data = await BurnerApi.dropPayload({
         pin: activePin,
         senderToken,
+        idempotencyKey,
         type,
         shareMode: activeShareMode,
         maxReads: activeMaxReads,
@@ -333,6 +362,8 @@ export default function App() {
         textContent,
         file: fileMeta,
         encryptedBundle,
+        keyVerificationBlob,
+        keyMode,
       });
 
       if (data.success) {
@@ -351,7 +382,13 @@ export default function App() {
         if (data.senderToken) {
           setSenderToken(data.senderToken);
         }
-        if (data.expiresAt) {
+        if (data.bootId) {
+          setBootId(data.bootId);
+          bootIdRef.current = data.bootId;
+        }
+        if (data.remainingMs) {
+          setExpiresAt(Date.now() + data.remainingMs);
+        } else if (data.expiresAt) {
           setExpiresAt(data.expiresAt);
         }
       }

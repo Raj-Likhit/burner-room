@@ -543,3 +543,47 @@ export async function openDataUrlInNewTab(dataUrl: string, fileName?: string): P
     window.open(dataUrl, '_blank');
   }
 }
+
+const VERIFICATION_CONSTANT = 'BURNER_VERIFY_V1';
+
+/**
+ * Creates an encrypted verification blob of a known constant
+ * so the receiver can prove the decryption key is valid before picking up the payload.
+ */
+export async function createVerificationBlob(key: CryptoKey): Promise<{ ciphertext: string; iv: string }> {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(VERIFICATION_CONSTANT);
+  // Guarantee a completely independent, fresh random 12-byte IV dedicated solely to the verification blob
+  // Reusing an IV under the same AES-GCM key breaks encryption guarantees
+  const freshVerificationIv = window.crypto.getRandomValues(new Uint8Array(12));
+  const encryptedBuffer = await window.crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: freshVerificationIv,
+    },
+    key,
+    encoded
+  );
+  return {
+    ciphertext: bufferToBase64(encryptedBuffer),
+    iv: bufferToBase64(freshVerificationIv.buffer),
+  };
+}
+
+/**
+ * Verifies that a given CryptoKey can successfully decrypt the verification blob
+ * and matches the known constant.
+ */
+export async function verifyKeyWithBlob(
+  blob: { ciphertext: string; iv: string } | undefined,
+  key: CryptoKey
+): Promise<boolean> {
+  if (!blob || !blob.ciphertext || !blob.iv) return false;
+  try {
+    const decrypted = await decryptData({ ...blob, isEncrypted: true }, key);
+    return decrypted === VERIFICATION_CONSTANT;
+  } catch {
+    return false;
+  }
+}
+
