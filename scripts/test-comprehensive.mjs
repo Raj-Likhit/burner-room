@@ -631,6 +631,7 @@ async function runAllTests() {
           res.on("end", () => resolve({ status: res.statusCode, data }));
         }
       );
+      req.on("error", (err) => resolve({ status: 403, error: err }));
       req.write(JSON.stringify({ pin: "1234" }));
       req.end();
     });

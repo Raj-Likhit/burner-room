@@ -22,9 +22,13 @@ const SESSION_STORAGE_KEY = 'burner_room_active_session_v2';
 
 export default function App() {
   const [mode, setMode] = useState<'drop' | 'pickup'>('drop');
-  const [pin, setPin] = useState<string>('----');
+  const [pin, setPin] = useState<string>(() => {
+    return Math.floor(1000 + Math.random() * 9000).toString();
+  });
   const [senderToken, setSenderToken] = useState<string>('');
   const [ttlSeconds, setTtlSeconds] = useState<number>(600);
+  const ttlSecondsRef = useRef<number>(600);
+  const initialMountFiredRef = useRef<boolean>(false);
   const [expiresAt, setExpiresAt] = useState<number>(Date.now() + 600 * 1000);
   const [isUploaded, setIsUploaded] = useState<boolean>(false);
   const [uploadedType, setUploadedType] = useState<PayloadType | null>(null);
@@ -108,7 +112,7 @@ export default function App() {
   // Fetch or generate fresh session PIN from server
   const fetchNewSession = useCallback(async (customTtl?: number, requestedCustomPin?: string) => {
     setIsLoading(true);
-    const activeTtl = customTtl || ttlSeconds;
+    const activeTtl = customTtl || ttlSecondsRef.current;
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
 
     try {
@@ -122,6 +126,7 @@ export default function App() {
       }
       if (data.ttlSeconds) {
         setTtlSeconds(data.ttlSeconds);
+        ttlSecondsRef.current = data.ttlSeconds;
       }
       setIsUploaded(false);
       setIsFileDeleted(false);
@@ -135,17 +140,20 @@ export default function App() {
       setBurnedNotice(null);
     } catch (e) {
       console.error('Failed to fetch new session', e);
-      const localPin = requestedCustomPin || Math.floor(1000 + Math.random() * 9000).toString();
-      setPin(localPin);
+      const fallbackPin = requestedCustomPin || Math.floor(1000 + Math.random() * 9000).toString();
+      setPin((prev) => (prev && /^\d{4}$/.test(prev) ? prev : fallbackPin));
       setSenderToken(Math.random().toString(36).substring(2));
       setExpiresAt(Date.now() + activeTtl * 1000);
     } finally {
       setIsLoading(false);
     }
-  }, [ttlSeconds]);
+  }, []);
 
   // Restore sender session from sessionStorage if present (Sender-side reconnect QoL)
   useEffect(() => {
+    if (initialMountFiredRef.current) return;
+    initialMountFiredRef.current = true;
+
     let restored = false;
     try {
       const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
@@ -156,6 +164,7 @@ export default function App() {
           setSenderToken(parsed.senderToken);
           setExpiresAt(parsed.expiresAt);
           setTtlSeconds(parsed.ttlSeconds);
+          ttlSecondsRef.current = parsed.ttlSeconds;
           setIsUploaded(parsed.isUploaded);
           setUploadedType(parsed.uploadedType || null);
           setUploadedFileName(parsed.uploadedFileName);
@@ -174,9 +183,9 @@ export default function App() {
     }
 
     if (!restored) {
-      fetchNewSession();
+      fetchNewSession(undefined, pin);
     }
-  }, [fetchNewSession]);
+  }, [fetchNewSession, pin]);
 
   // Save active session state whenever it updates
   useEffect(() => {
@@ -318,16 +327,11 @@ export default function App() {
   const handleTtlChange = (newTtl: number) => {
     const clamped = Math.min(3600, Math.max(60, newTtl));
     setTtlSeconds(clamped);
+    ttlSecondsRef.current = clamped;
     if (!isUploaded) {
       setExpiresAt(Date.now() + clamped * 1000);
     }
   };
-
-  useEffect(() => {
-    if (!isUploaded && pin === '----') {
-      fetchNewSession();
-    }
-  }, [isUploaded, pin, fetchNewSession]);
 
   // Handle Drop action
   const handleDropPayload = async (

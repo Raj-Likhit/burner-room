@@ -27,7 +27,7 @@ import {
   formatFriendlyFileSize,
   verifyKeyWithBlob,
 } from '../lib/crypto';
-import { BurnerApi, normalizeApiError } from '../lib/api';
+import { BurnerApi, normalizeApiError, API_BASE } from '../lib/api';
 import { FileIconPreview } from './FileIconPreview';
 import { ClipboardFallbackModal } from './ClipboardFallbackModal';
 
@@ -118,7 +118,7 @@ export const PickupView: React.FC<PickupViewProps> = ({
   useEffect(() => {
     if (activePinString.length !== 4) return;
 
-    const sseUrl = `/api/events/${activePinString}`;
+    const sseUrl = `${API_BASE}/api/events/${activePinString}`;
     let es: EventSource | null = null;
     try {
       es = new EventSource(sseUrl);
@@ -736,6 +736,8 @@ export const PickupView: React.FC<PickupViewProps> = ({
                         ? 'Download Slot Busy'
                         : apiError.code === 'SERVER_RESTARTED'
                         ? 'Server Restarted'
+                        : apiError.code === 'SERVERLESS_UNSUPPORTED' || apiError.code === 'SERVER_UNAVAILABLE'
+                        ? 'Backend Server Connecting'
                         : 'Transfer Unavailable'}
                     </span>
                     {lockoutSeconds !== null && lockoutSeconds > 0 && (

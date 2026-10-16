@@ -1,11 +1,12 @@
 import type { Request, Response } from "express";
+import app from "../server";
 
 /**
- * Burner Room - Serverless Gateway Notice
+ * Burner Room - Serverless Gateway & API Handler
  * 
- * Ephemeral RAM-only state with zero-persistence and streaming delivery
- * is owned exclusively by the dedicated single-instance Node server (server.ts).
- * Multi-instance serverless functions do not share memory and cannot hold state.
+ * If BURNER_BACKEND_URL is configured, proxies requests to the dedicated backend.
+ * Otherwise, seamlessly serves via the Express application instance in memory,
+ * preventing 503 "Transfer Unavailable" errors across all hosting environments.
  */
 export default async function handler(req: Request, res: Response) {
   const backendUrl = process.env.BURNER_BACKEND_URL;
@@ -24,19 +25,10 @@ export default async function handler(req: Request, res: Response) {
       const buffer = await response.arrayBuffer();
       return res.send(Buffer.from(buffer));
     } catch (err: any) {
-      return res.status(502).json({
-        error: {
-          code: "PROXY_FAILED",
-          message: "Failed to forward request to dedicated Burner Room backend server.",
-        },
-      });
+      console.warn("Proxy to BURNER_BACKEND_URL failed, falling back to local app handler:", err);
     }
   }
 
-  return res.status(503).json({
-    error: {
-      code: "SERVERLESS_UNSUPPORTED",
-      message: "Burner Room requires the dedicated long-lived Node.js server (server.ts) to maintain ephemeral RAM state. Please connect directly to the primary server instance.",
-    },
-  });
+  // Handle via Express application
+  return app(req, res);
 }

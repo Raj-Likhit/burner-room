@@ -575,40 +575,39 @@ setInterval(() => {
   }
 }, 5000);
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // Configurable reverse proxy trust (default 1 hop; supports CDN + platform proxy when TRUST_PROXY=2)
-  const trustProxyEnv = process.env.TRUST_PROXY;
-  if (trustProxyEnv) {
-    const num = parseInt(trustProxyEnv, 10);
-    app.set("trust proxy", isNaN(num) ? trustProxyEnv : num);
-  } else {
-    app.set("trust proxy", 1);
+// Configurable reverse proxy trust (default 1 hop; supports CDN + platform proxy when TRUST_PROXY=2)
+const trustProxyEnv = process.env.TRUST_PROXY;
+if (trustProxyEnv) {
+  const num = parseInt(trustProxyEnv, 10);
+  app.set("trust proxy", isNaN(num) ? trustProxyEnv : num);
+} else {
+  app.set("trust proxy", 1);
+}
+
+// Cross-Origin Resource Sharing (CORS) for static frontend deployments
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, X-Burner-Client, X-Sender-Token, X-Requested-With, Range, Accept"
+    );
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      "X-Boot-Id, Retry-After, Content-Disposition, Content-Length"
+    );
   }
-
-  // Cross-Origin Resource Sharing (CORS) for static frontend deployments
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const origin = req.headers.origin;
-    if (origin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS");
-      res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type, X-Burner-Client, X-Sender-Token, X-Requested-With, Range, Accept"
-      );
-      res.setHeader(
-        "Access-Control-Expose-Headers",
-        "X-Boot-Id, Retry-After, Content-Disposition, Content-Length"
-      );
-    }
-    if (req.method === "OPTIONS") {
-      return res.sendStatus(204);
-    }
-    next();
-  });
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
 
   // 1. Tag all responses with BOOT_ID
   app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -1494,7 +1493,8 @@ async function startServer() {
     return sendApiError(res, 404, "NOT_FOUND", "API route not found.", false);
   });
 
-  // --- VITE MIDDLEWARE ---
+  // --- VITE MIDDLEWARE & HTTP SERVER START ---
+export async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1517,6 +1517,12 @@ async function startServer() {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
   server.requestTimeout = 300000;
+  return server;
 }
 
-startServer();
+export default app;
+
+// If started directly (e.g., node server.cjs or tsx server.ts)
+startServer().catch((err) => {
+  console.error("Failed to start Burner Room server:", err);
+});

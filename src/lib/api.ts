@@ -104,6 +104,13 @@ export function normalizeApiError(errorObj: any, status: number = 0, bootId?: st
       retryAfter: 600,
     };
   }
+  if (status === 503) {
+    return {
+      code: errorObj?.error?.code || 'SERVER_UNAVAILABLE',
+      message: errorObj?.error?.message || 'Server is temporarily unavailable. Please connect directly to the primary server instance.',
+      retryable: false,
+    };
+  }
   if (status === 507) {
     return {
       code: 'BUFFER_FULL',
@@ -255,6 +262,10 @@ export async function fetchWithRetry<T>(
   });
 }
 
+export const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_BASE_URL)
+  ? String((import.meta as any).env.VITE_API_BASE_URL).replace(/\/$/, '')
+  : '';
+
 /**
  * Client API methods
  */
@@ -263,7 +274,7 @@ export const BurnerApi = {
    * Request a fresh session PIN with sender ownership token
    */
   async getSession(ttlSeconds = 600, requestedPin?: string): Promise<SessionResponse> {
-    let url = `/api/session?ttl=${ttlSeconds}`;
+    let url = `${API_BASE}/api/session?ttl=${ttlSeconds}`;
     if (requestedPin && requestedPin.length === 4) {
       url += `&customPin=${encodeURIComponent(requestedPin)}`;
     }
@@ -278,7 +289,7 @@ export const BurnerApi = {
    * Transition session to 'staged' state during sender's undo countdown
    */
   async stageSession(pin: string, senderToken: string): Promise<{ success: boolean; state: string; bootId?: string }> {
-    return fetchWithRetry<{ success: boolean; state: string; bootId?: string }>('/api/session/stage', {
+    return fetchWithRetry<{ success: boolean; state: string; bootId?: string }>(`${API_BASE}/api/session/stage`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -291,14 +302,14 @@ export const BurnerApi = {
    * Check if a 4-digit custom PIN is available
    */
   async checkPinAvailability(pin: string): Promise<CheckPinAvailabilityResponse> {
-    return fetchWithRetry<CheckPinAvailabilityResponse>(`/api/session/check-pin/${encodeURIComponent(pin)}`);
+    return fetchWithRetry<CheckPinAvailabilityResponse>(`${API_BASE}/api/session/check-pin/${encodeURIComponent(pin)}`);
   },
 
   /**
    * Arm payload into in-memory ephemeral store and publish to 'live'
    */
   async dropPayload(payload: DropPayloadRequest): Promise<DropPayloadResponse> {
-    return fetchWithRetry<DropPayloadResponse>('/api/drop', {
+    return fetchWithRetry<DropPayloadResponse>(`${API_BASE}/api/drop`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -311,7 +322,7 @@ export const BurnerApi = {
    * Check payload metadata without burning (safe preview)
    */
   async checkPin(pin: string): Promise<CheckPayloadResponse> {
-    return fetchWithRetry<CheckPayloadResponse>(`/api/check/${encodeURIComponent(pin)}`);
+    return fetchWithRetry<CheckPayloadResponse>(`${API_BASE}/api/check/${encodeURIComponent(pin)}`);
   },
 
   async checkPayload(pin: string): Promise<CheckPayloadResponse> {
@@ -322,7 +333,7 @@ export const BurnerApi = {
    * Explicit human retrieval and unlock (slot reservation)
    */
   async pickupPayload(pin: string): Promise<PickupPayloadResponse> {
-    return fetchWithRetry<PickupPayloadResponse>('/api/pickup', {
+    return fetchWithRetry<PickupPayloadResponse>(`${API_BASE}/api/pickup`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -335,7 +346,7 @@ export const BurnerApi = {
    * Manually incinerate payload with sender ownership token
    */
   async burnPayload(pin: string, senderToken: string): Promise<{ success: boolean; message: string }> {
-    return fetchWithRetry<{ success: boolean; message: string }>('/api/burn', {
+    return fetchWithRetry<{ success: boolean; message: string }>(`${API_BASE}/api/burn`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
